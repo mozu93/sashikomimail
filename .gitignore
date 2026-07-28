@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.verification_appdata/
+dist/
+build/
+assets/icon-b-source.png
+installer_output/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+token_cache*.bin
+app_config.json
