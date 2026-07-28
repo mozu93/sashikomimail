@@ -1,8 +1,10 @@
 # 差し込みメール送信
 
+[![CI](https://github.com/mozu93/sashikomimail/actions/workflows/ci.yml/badge.svg)](https://github.com/mozu93/sashikomimail/actions/workflows/ci.yml)
+
 Windows / Microsoft 365対応の差し込みメール送信デスクトップアプリです。
 
-最新バージョン：**1.0.0**
+最新バージョン：**1.1.0**
 
 Excel / CSV の任意列を差し込みタグとして使用し、Microsoft 365（Microsoft
 Graph API）から個別メールを一括送信する Windows デスクトップアプリです。
@@ -77,6 +79,18 @@ python main.py
 python -m pip install -r requirements-dev.txt
 .\build.ps1
 ```
+
+## アップデート
+
+インストール済みアプリは起動時にGitHub Releasesを確認します。新しい正式版が
+ある場合は画面上部に通知され、「ダウンロード」から更新用インストーラーを取得し、
+「今すぐ更新」でアプリの終了・更新・再起動を行えます。更新確認に失敗しても
+通常機能には影響しません。
+
+GitHub Actionsの「CI」はmainへのpushとPull Requestでテストを実行します。
+「Release」は`v*`タグまたは手動実行でWindows版インストーラーを作成し、
+GitHub Releaseへ添付します。自動更新には、このReleaseが添付する
+`SashikomiMail-Setup-vX.Y.Z.exe`を使用します。
 
 テスト合格後、`dist\SashikomiMail\SashikomiMail.exe` を含む配布フォルダが
 作成されます。Inno Setupを導入している場合は `installer/setup.iss` を

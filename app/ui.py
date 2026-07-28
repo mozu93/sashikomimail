@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import shutil
+import threading
+import webbrowser
 from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -21,6 +23,10 @@ from app.graph import (
     ATTACHMENT_LIMIT, get_access_token, get_cached_accounts, send_mail, sign_out,
 )
 from app.storage import Storage
+from app.updater import (
+    GITHUB_RELEASES_URL, check_latest_version, download_installer,
+    is_newer_version, launch_installer,
+)
 from app.version import __version__
 
 APP_STYLE = """
@@ -108,6 +114,100 @@ class PreviewDialog(QDialog):
         close = QPushButton("閉じる")
         close.clicked.connect(self.accept)
         layout.addWidget(close)
+
+
+class UpdateBanner(QWidget):
+    update_found = pyqtSignal(dict)
+    download_progress = pyqtSignal(int, int)
+    download_finished = pyqtSignal(object)
+    download_failed = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.info: dict = {}
+        self.installer_path: Path | None = None
+        self.setStyleSheet(
+            "UpdateBanner { background:#fef9c3; border:1px solid #fde047; }"
+            "UpdateBanner QLabel { color:#713f12; }")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 6, 8, 6)
+        self.message = QLabel()
+        self.action = QPushButton("ダウンロード")
+        self.close_button = QPushButton("×")
+        self.close_button.setFixedWidth(32)
+        layout.addWidget(self.message, 1)
+        layout.addWidget(self.action)
+        layout.addWidget(self.close_button)
+        self.action.clicked.connect(self.start_download)
+        self.close_button.clicked.connect(self.hide)
+        self.update_found.connect(self.show_update)
+        self.download_progress.connect(self.show_progress)
+        self.download_finished.connect(self.download_ready)
+        self.download_failed.connect(self.show_error)
+        self.hide()
+        threading.Thread(target=self.check, daemon=True).start()
+
+    def check(self):
+        info = check_latest_version()
+        if info and is_newer_version(__version__, info["tag_name"]):
+            self.update_found.emit(info)
+
+    def show_update(self, info: dict):
+        self.info = info
+        self.message.setText(
+            f"新しいバージョン {info['tag_name']} があります（現在 v{__version__}）")
+        if info.get("download_url"):
+            self.action.setText("ダウンロード")
+            self.action.setEnabled(True)
+        else:
+            self.action.setText("GitHubで確認")
+        self.show()
+
+    def start_download(self):
+        url = self.info.get("download_url", "")
+        if not url:
+            webbrowser.open(self.info.get("html_url", GITHUB_RELEASES_URL))
+            return
+        self.action.setEnabled(False)
+        threading.Thread(target=self._download, args=(url,), daemon=True).start()
+
+    def _download(self, url: str):
+        try:
+            path = download_installer(
+                url,
+                lambda received, total: self.download_progress.emit(received, total),
+            )
+            self.download_finished.emit(path)
+        except Exception as exc:
+            self.download_failed.emit(str(exc))
+
+    def show_progress(self, received: int, total: int):
+        received_mb = received / 1048576
+        total_text = f" / {total / 1048576:.1f} MB" if total else " MB"
+        self.message.setText(f"アップデートをダウンロード中: {received_mb:.1f}{total_text}")
+
+    def download_ready(self, path: Path):
+        self.installer_path = path
+        self.message.setText("ダウンロード完了。更新するとアプリを再起動します。")
+        self.action.setText("今すぐ更新")
+        self.action.setEnabled(True)
+        self.action.clicked.disconnect()
+        self.action.clicked.connect(self.install)
+
+    def show_error(self, detail: str):
+        self.message.setText(f"ダウンロードに失敗しました: {detail}")
+        self.action.setText("再試行")
+        self.action.setEnabled(True)
+
+    def install(self):
+        if not self.installer_path:
+            return
+        try:
+            launch_installer(self.installer_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "アップデート", str(exc))
+            return
+        QApplication.quit()
 
 
 class ComposeTab(QWidget):
@@ -1345,7 +1445,14 @@ class MainWindow(QMainWindow):
         self.templates.changed.connect(self.compose.refresh_templates)
         self.signatures.changed.connect(self.compose.refresh_signatures)
         self.history.resend_requested.connect(self.resend_from_history)
-        self.setCentralWidget(self.tabs)
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        self.update_banner = UpdateBanner()
+        central_layout.addWidget(self.update_banner)
+        central_layout.addWidget(self.tabs, 1)
+        self.setCentralWidget(central)
         self.statusBar().showMessage("ExcelまたはCSVを選択してください")
 
     def refresh_current(self, index: int):
@@ -1359,6 +1466,7 @@ class MainWindow(QMainWindow):
     def set_sending_state(self, sending: bool):
         for index in range(1, self.tabs.count()):
             self.tabs.setTabEnabled(index, not sending)
+        self.update_banner.action.setEnabled(not sending)
 
     def resend_from_history(self, messages: list[dict]):
         self.tabs.setCurrentWidget(self.compose)

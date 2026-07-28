@@ -1,5 +1,5 @@
 #define MyAppName "差し込みメール送信"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "四日市商工会議所"
 #define MyAppExeName "SashikomiMail.exe"
 
@@ -31,4 +31,3 @@ Name: "desktopicon"; Description: "デスクトップにショートカットを
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{#MyAppName}を起動"; Flags: nowait postinstall skipifsilent
-
