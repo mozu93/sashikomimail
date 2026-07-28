@@ -297,10 +297,14 @@ class ComposeTab(QWidget):
         self.cc_column.currentTextChanged.connect(self.refresh_validation)
         self.bcc = QLineEdit()
         self.bcc.setPlaceholderText("複数指定は ; または , で区切る")
+        self.sender = QComboBox()
+        self.sender.setToolTip("この送信で使用する差出人を選択します")
         form.addRow("To列（必須）", self.to_column)
         form.addRow("CC列（任意）", self.cc_column)
         form.addRow("固定BCC", self.bcc)
+        form.addRow("差出人", self.sender)
         editor_layout.addWidget(destination)
+        self.refresh_sender_options()
 
         template = QGroupBox("4. 件名・本文")
         template_layout = QVBoxLayout(template)
@@ -431,6 +435,32 @@ class ComposeTab(QWidget):
             self.signature_combo.addItem(signature["name"], signature["body"])
         index = self.signature_combo.findText(current)
         self.signature_combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def refresh_sender_options(self):
+        """設定済みアカウントから、この送信で選べる差出人を更新する。"""
+        current_mode = self.sender.currentData()
+        settings = self.storage.settings()
+        account = settings.get("account_username", "")
+        proxy = settings.get("from_address", "")
+        self.sender.clear()
+        self.sender.addItem(
+            f"自分のアドレス（{account}）" if account else "自分のアドレス",
+            "self",
+        )
+        if proxy:
+            self.sender.addItem(f"代理差出人（{proxy}）", "proxy")
+        index = self.sender.findData(current_mode)
+        self.sender.setCurrentIndex(index if index >= 0 else 0)
+
+    def selected_sender_config(self) -> tuple[dict, str]:
+        settings = self.storage.settings()
+        account = settings.get("account_username", "") or "未確認"
+        proxy = settings.get("from_address", "")
+        if self.sender.currentData() == "proxy" and proxy:
+            settings["from_address"] = proxy
+            return settings, proxy
+        settings["from_address"] = ""
+        return settings, account
 
     def choose_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -857,7 +887,7 @@ class ComposeTab(QWidget):
         messages = self.preflight()
         if not messages:
             return
-        settings = self.storage.settings()
+        settings, from_address = self.selected_sender_config()
         account = settings.get("account_username", "") or "未確認"
         if account == "未確認":
             QMessageBox.warning(
@@ -865,7 +895,6 @@ class ComposeTab(QWidget):
                 "設定タブで「サインイン／確認」を実行し、"
                 "送信アカウントを確認してから一括送信してください。")
             return
-        from_address = settings.get("from_address", "") or account
         answer = QMessageBox.question(
             self, "一括送信の最終確認",
             f"{len(messages)}件を1件ずつ個別送信します。\n\n"
@@ -887,7 +916,7 @@ class ComposeTab(QWidget):
         if self.worker and self.worker.isRunning():
             QMessageBox.warning(self, "送信中", "別の送信処理が実行中です。")
             return
-        settings = self.storage.settings()
+        settings, _from_address = self.selected_sender_config()
         self.send_errors = []
         interval_ms = max(int(settings.get("interval_ms", 2000)), 2000)
         self.worker = SendWorker(settings, messages, interval_ms)
@@ -1258,6 +1287,8 @@ class SignatureTab(QWidget):
 
 
 class SettingsTab(QWidget):
+    changed = pyqtSignal()
+
     def __init__(self, storage: Storage):
         super().__init__()
         self.storage = storage
@@ -1396,6 +1427,7 @@ class SettingsTab(QWidget):
             "interval_ms": self.interval.value(),
             "retention_days": self.retention_days.value(),
         })
+        self.changed.emit()
         QMessageBox.information(self, "設定", "設定を保存しました。")
 
     def backup_data(self):
@@ -1444,6 +1476,7 @@ class MainWindow(QMainWindow):
         self.compose.sending_state_changed.connect(self.set_sending_state)
         self.templates.changed.connect(self.compose.refresh_templates)
         self.signatures.changed.connect(self.compose.refresh_signatures)
+        self.settings.changed.connect(self.compose.refresh_sender_options)
         self.history.resend_requested.connect(self.resend_from_history)
         central = QWidget()
         central_layout = QVBoxLayout(central)
@@ -1456,7 +1489,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("ExcelまたはCSVを選択してください")
 
     def refresh_current(self, index: int):
-        if self.tabs.widget(index) is self.templates:
+        if self.tabs.widget(index) is self.compose:
+            self.compose.refresh_sender_options()
+        elif self.tabs.widget(index) is self.templates:
             self.templates.refresh()
         elif self.tabs.widget(index) is self.signatures:
             self.signatures.refresh()
