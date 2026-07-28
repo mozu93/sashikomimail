@@ -5,7 +5,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog, QFormLayout,
@@ -224,7 +224,10 @@ class ComposeTab(QWidget):
         self.individual_match_column = ""
         self.individual_folder = ""
         self.filtered_indices: list[int] = []
+        self.filter_indices: list[int] = []
         self.source_path = ""
+        self.recipient_display_name = ""
+        self._updating_table = False
         self.worker: SendWorker | None = None
         self.job_id: int | None = None
         self.job_success = self.job_error = 0
@@ -256,7 +259,7 @@ class ComposeTab(QWidget):
         splitter = QSplitter()
         left = QWidget()
         left_layout = QVBoxLayout(left)
-        preview_box = QGroupBox("2. データプレビュー（ダブルクリックで送信プレビュー）")
+        preview_box = QGroupBox("2. データプレビュー（セルをクリックして編集）")
         preview_layout = QVBoxLayout(preview_box)
         filter_row = QHBoxLayout()
         self.filter_column = QComboBox()
@@ -276,13 +279,30 @@ class ComposeTab(QWidget):
         filter_row.addWidget(self.filter_value, 1)
         filter_row.addWidget(apply_filter_button)
         filter_row.addWidget(clear_filter_button)
+        search_row = QHBoxLayout()
+        self.search_value = QLineEdit()
+        self.search_value.setPlaceholderText("全列から検索（入力するとすぐに反映）")
+        self.search_value.textChanged.connect(self.update_visible_rows)
+        clear_search_button = QPushButton("検索をクリア")
+        clear_search_button.clicked.connect(self.search_value.clear)
+        delete_row_button = QPushButton("選択行を削除")
+        delete_row_button.setObjectName("danger")
+        delete_row_button.clicked.connect(self.delete_selected_row)
+        search_row.addWidget(QLabel("検索"))
+        search_row.addWidget(self.search_value, 1)
+        search_row.addWidget(clear_search_button)
+        search_row.addWidget(delete_row_button)
         self.summary = QLabel("0件")
         self.table = QTableWidget()
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.SelectedClicked)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.doubleClicked.connect(self.preview_selected)
+        self.table.itemChanged.connect(self.on_table_item_changed)
         preview_layout.addLayout(filter_row)
+        preview_layout.addLayout(search_row)
         preview_layout.addWidget(self.summary)
         preview_layout.addWidget(self.table)
         left_layout.addWidget(preview_box)
@@ -481,7 +501,9 @@ class ComposeTab(QWidget):
         self.source_path, self.headers, self.rows = source_path, headers, rows
         self.clear_individual_attachments()
         self.filtered_indices = list(range(len(rows)))
+        self.filter_indices = list(range(len(rows)))
         source_name = display_name or Path(source_path).name
+        self.recipient_display_name = source_name
         self.file_label.setText(f"{source_name}（{len(self.rows)}件）")
         self.to_column.clear()
         self.to_column.addItems(self.headers)
@@ -491,6 +513,9 @@ class ComposeTab(QWidget):
         self.filter_column.clear()
         self.filter_column.addItems(self.headers)
         self.filter_value.clear()
+        self.search_value.blockSignals(True)
+        self.search_value.clear()
+        self.search_value.blockSignals(False)
         guessed = next((h for h in self.headers if "メール" in h or "mail" in h.lower()), "")
         if guessed:
             self.to_column.setCurrentText(guessed)
@@ -561,13 +586,17 @@ class ComposeTab(QWidget):
         QMessageBox.information(self, "名簿削除", f"名簿「{item['name']}」を削除しました。")
 
     def render_table(self):
+        self._updating_table = True
         self.table.setColumnCount(len(self.headers) + 1)
         self.table.setHorizontalHeaderLabels(["状態"] + self.headers)
         self.table.setRowCount(len(self.rows))
         for r, row in enumerate(self.rows):
-            self.table.setItem(r, 0, QTableWidgetItem(""))
+            status_item = QTableWidgetItem("")
+            status_item.setFlags(status_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(r, 0, status_item)
             for c, header in enumerate(self.headers, 1):
                 self.table.setItem(r, c, QTableWidgetItem(row.get(header, "")))
+        self._updating_table = False
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
         if self.rows:
@@ -576,41 +605,89 @@ class ComposeTab(QWidget):
 
     def refresh_validation(self):
         if not self.rows or not self.to_column.currentText():
+            self.summary.setText(f"表示・送信対象 0件 / 全{len(self.rows)}件")
             return
         indices = self.filtered_indices or []
         target_rows = [self.rows[index] for index in indices]
         subset_errors = validate_rows(
             target_rows, self.to_column.currentText(), self.cc_column.currentText())
         errors = {indices[index]: value for index, value in subset_errors.items()}
+        self._updating_table = True
         for row_index in range(len(self.rows)):
             item = self.table.item(row_index, 0)
             if not item:
                 continue
             if row_index in errors:
                 item.setText("エラー")
-                item.setToolTip("\n".join(errors[row_index]))
+                error_detail = "\n".join(errors[row_index])
                 for column in range(self.table.columnCount()):
-                    self.table.item(row_index, column).setBackground(QColor("#fee2e2"))
+                    cell = self.table.item(row_index, column)
+                    cell.setToolTip(error_detail)
+                    cell.setBackground(QColor("#fee2e2"))
             else:
                 item.setText("OK")
-                item.setToolTip("")
                 for column in range(self.table.columnCount()):
-                    self.table.item(row_index, column).setBackground(QColor("white"))
+                    cell = self.table.item(row_index, column)
+                    cell.setToolTip("")
+                    cell.setBackground(QColor("white"))
+        self._updating_table = False
         self.summary.setText(
             f"表示・送信対象 {len(indices)}件 / 全{len(self.rows)}件"
             f"（対象内エラー {len(errors)}件）")
+
+    def on_table_item_changed(self, item: QTableWidgetItem):
+        if self._updating_table or item.column() == 0:
+            return
+        row_index = item.row()
+        column_index = item.column() - 1
+        if row_index >= len(self.rows) or column_index >= len(self.headers):
+            return
+        header = self.headers[column_index]
+        self.rows[row_index][header] = item.text().strip()
+        if header == self.individual_match_column:
+            self.clear_individual_attachments()
+        if self.search_value.text().strip():
+            self.update_visible_rows()
+        else:
+            self.refresh_validation()
+
+    def delete_selected_row(self):
+        row_index = self.table.currentRow()
+        if row_index < 0 or row_index >= len(self.rows):
+            QMessageBox.information(self, "行の削除", "削除する行を選択してください。")
+            return
+        preview = " / ".join(
+            value for value in self.rows[row_index].values() if value)[:100]
+        if QMessageBox.question(
+                self, "行の削除",
+                f"選択した行を名簿から削除しますか？\n\n{preview}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self.rows.pop(row_index)
+        self.filter_indices = list(range(len(self.rows)))
+        self.filtered_indices = list(range(len(self.rows)))
+        self.file_label.setText(
+            f"{self.recipient_display_name}（{len(self.rows)}件）")
+        self.clear_individual_attachments()
+        self.render_table()
+        self.apply_filter(silent=True)
 
     def update_filter_input_state(self):
         needs_value = self.filter_operator.currentText() in ("含む", "完全一致")
         self.filter_value.setEnabled(needs_value)
 
-    def apply_filter(self):
+    def apply_filter(self, _checked: bool = False, silent: bool = False):
         if not self.rows or not self.filter_column.currentText():
             return
         column = self.filter_column.currentText()
         operator = self.filter_operator.currentText()
         needle = self.filter_value.text().strip().casefold()
         if operator in ("含む", "完全一致") and not needle:
+            if silent:
+                self.filter_indices = list(range(len(self.rows)))
+                self.update_visible_rows()
+                return
             QMessageBox.information(self, "絞り込み", "絞り込む文字を入力してください。")
             return
         matched = []
@@ -623,6 +700,24 @@ class ComposeTab(QWidget):
                 or (operator == "空欄" and not value)
                 or (operator == "空欄でない" and bool(value))
             )
+            if include:
+                matched.append(index)
+        self.filter_indices = matched
+        self.update_visible_rows()
+
+    def clear_filter(self):
+        self.filter_indices = list(range(len(self.rows)))
+        self.filter_value.clear()
+        self.update_visible_rows()
+
+    def update_visible_rows(self, _text: str = ""):
+        needle = self.search_value.text().strip().casefold()
+        base = set(self.filter_indices)
+        matched = []
+        for index, row in enumerate(self.rows):
+            search_match = not needle or any(
+                needle in value.casefold() for value in row.values())
+            include = index in base and search_match
             self.table.setRowHidden(index, not include)
             if include:
                 matched.append(index)
@@ -631,15 +726,6 @@ class ComposeTab(QWidget):
             self.table.selectRow(matched[0])
         else:
             self.table.clearSelection()
-        self.refresh_validation()
-
-    def clear_filter(self):
-        self.filtered_indices = list(range(len(self.rows)))
-        for index in range(len(self.rows)):
-            self.table.setRowHidden(index, False)
-        self.filter_value.clear()
-        if self.rows:
-            self.table.selectRow(0)
         self.refresh_validation()
 
     def load_template(self):
