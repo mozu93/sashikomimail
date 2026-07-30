@@ -228,6 +228,9 @@ class ComposeTab(QWidget):
         self.source_path = ""
         self.recipient_display_name = ""
         self._updating_table = False
+        # 確認時点のエラー内容を保持する。内容が変われば許可は自動的に無効になる。
+        self.approved_validation_issues: dict[int, tuple[str, ...]] = {}
+        self.validation_errors: dict[int, list[str]] = {}
         self.worker: SendWorker | None = None
         self.job_id: int | None = None
         self.job_success = self.job_error = 0
@@ -288,9 +291,14 @@ class ComposeTab(QWidget):
         delete_row_button = QPushButton("選択行を削除")
         delete_row_button.setObjectName("danger")
         delete_row_button.clicked.connect(self.delete_selected_row)
+        approve_error_button = QPushButton("選択行のエラーを確認・有効化")
+        approve_error_button.setToolTip(
+            "エラー内容を確認し、問題がない行だけ送信対象として有効にします")
+        approve_error_button.clicked.connect(self.approve_selected_row_errors)
         search_row.addWidget(QLabel("検索"))
         search_row.addWidget(self.search_value, 1)
         search_row.addWidget(clear_search_button)
+        search_row.addWidget(approve_error_button)
         search_row.addWidget(delete_row_button)
         self.summary = QLabel("0件")
         self.table = QTableWidget()
@@ -313,8 +321,8 @@ class ComposeTab(QWidget):
         destination = QGroupBox("3. 宛先設定")
         form = QFormLayout(destination)
         self.to_column, self.cc_column = QComboBox(), QComboBox()
-        self.to_column.currentTextChanged.connect(self.refresh_validation)
-        self.cc_column.currentTextChanged.connect(self.refresh_validation)
+        self.to_column.currentTextChanged.connect(self.on_validation_columns_changed)
+        self.cc_column.currentTextChanged.connect(self.on_validation_columns_changed)
         self.bcc = QLineEdit()
         self.bcc.setPlaceholderText("複数指定は ; または , で区切る")
         self.sender = QComboBox()
@@ -499,6 +507,8 @@ class ComposeTab(QWidget):
     def apply_recipient_data(self, source_path: str, headers: list[str],
                              rows: list[dict[str, str]], display_name: str = ""):
         self.source_path, self.headers, self.rows = source_path, headers, rows
+        self.approved_validation_issues.clear()
+        self.validation_errors.clear()
         self.clear_individual_attachments()
         self.filtered_indices = list(range(len(rows)))
         self.filter_indices = list(range(len(rows)))
@@ -612,18 +622,26 @@ class ComposeTab(QWidget):
         subset_errors = validate_rows(
             target_rows, self.to_column.currentText(), self.cc_column.currentText())
         errors = {indices[index]: value for index, value in subset_errors.items()}
+        self.validation_errors = errors
         self._updating_table = True
         for row_index in range(len(self.rows)):
             item = self.table.item(row_index, 0)
             if not item:
                 continue
             if row_index in errors:
-                item.setText("エラー")
                 error_detail = "\n".join(errors[row_index])
+                approved = (
+                    self.approved_validation_issues.get(row_index)
+                    == tuple(errors[row_index])
+                )
+                item.setText("確認済み" if approved else "エラー")
                 for column in range(self.table.columnCount()):
                     cell = self.table.item(row_index, column)
-                    cell.setToolTip(error_detail)
-                    cell.setBackground(QColor("#fee2e2"))
+                    cell.setToolTip(
+                        ("確認済み（送信対象）\n" if approved else "")
+                        + error_detail)
+                    cell.setBackground(
+                        QColor("#fef3c7") if approved else QColor("#fee2e2"))
             else:
                 item.setText("OK")
                 for column in range(self.table.columnCount()):
@@ -633,7 +651,48 @@ class ComposeTab(QWidget):
         self._updating_table = False
         self.summary.setText(
             f"表示・送信対象 {len(indices)}件 / 全{len(self.rows)}件"
-            f"（対象内エラー {len(errors)}件）")
+            f"（未確認エラー "
+            f"{sum(self.approved_validation_issues.get(i) != tuple(v) for i, v in errors.items())}件"
+            f" / 確認済み "
+            f"{sum(self.approved_validation_issues.get(i) == tuple(v) for i, v in errors.items())}件）")
+
+    def on_validation_columns_changed(self, _text: str = ""):
+        self.approved_validation_issues.clear()
+        self.refresh_validation()
+
+    def approve_selected_row_errors(self):
+        row_index = self.table.currentRow()
+        if row_index < 0 or row_index >= len(self.rows):
+            QMessageBox.information(
+                self, "エラーの確認", "確認する行を選択してください。")
+            return
+        issues = self.validation_errors.get(row_index, [])
+        if not issues:
+            QMessageBox.information(
+                self, "エラーの確認", "選択した行にエラーはありません。")
+            return
+        if self.approved_validation_issues.get(row_index) == tuple(issues):
+            QMessageBox.information(
+                self, "エラーの確認", "選択した行はすでに確認済みです。")
+            return
+        row_preview = "\n".join(
+            f"{header}: {self.rows[row_index].get(header, '')}"
+            for header in self.headers
+            if self.rows[row_index].get(header, "")
+        )
+        answer = QMessageBox.question(
+            self, "エラー行を有効化",
+            f"Excel / CSVの{row_index + 2}行目\n\n"
+            f"【エラー内容】\n・" + "\n・".join(issues)
+            + f"\n\n【行の内容】\n{row_preview or '（値なし）'}"
+            + "\n\n内容を確認し、問題がない場合だけ有効化してください。"
+              "\nこの行を送信対象にしますか？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.approved_validation_issues[row_index] = tuple(issues)
+            self.refresh_validation()
 
     def on_table_item_changed(self, item: QTableWidgetItem):
         if self._updating_table or item.column() == 0:
@@ -644,6 +703,7 @@ class ComposeTab(QWidget):
             return
         header = self.headers[column_index]
         self.rows[row_index][header] = item.text().strip()
+        self.approved_validation_issues.pop(row_index, None)
         if header in self.individual_match_columns:
             self.clear_individual_attachments()
         if self.search_value.text().strip():
@@ -665,6 +725,8 @@ class ComposeTab(QWidget):
                 QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
             return
         self.rows.pop(row_index)
+        self.approved_validation_issues.clear()
+        self.validation_errors.clear()
         self.filter_indices = list(range(len(self.rows)))
         self.filtered_indices = list(range(len(self.rows)))
         self.file_label.setText(
@@ -928,8 +990,27 @@ class ComposeTab(QWidget):
         target_rows = [self.rows[index] for index in target_indices]
         errors = validate_rows(
             target_rows, self.to_column.currentText(), self.cc_column.currentText())
-        if errors:
-            QMessageBox.warning(self, "確認", f"エラー行が{len(errors)}件あります。修正したファイルを再読込してください。")
+        unapproved_errors = {
+            target_indices[index]: issues
+            for index, issues in errors.items()
+            if self.approved_validation_issues.get(target_indices[index])
+            != tuple(issues)
+        }
+        if unapproved_errors:
+            preview = "\n".join(
+                f"{index + 2}行目: {'、'.join(issues)}"
+                for index, issues in list(unapproved_errors.items())[:10]
+            )
+            more = (
+                f"\nほか {len(unapproved_errors) - 10}件"
+                if len(unapproved_errors) > 10 else ""
+            )
+            QMessageBox.warning(
+                self, "確認",
+                f"未確認のエラー行が{len(unapproved_errors)}件あります。\n\n"
+                f"{preview}{more}\n\n"
+                "データプレビューで行を選び、"
+                "「選択行のエラーを確認・有効化」から確認してください。")
             return None
         bad_bcc = [x for x in split_addresses(self.bcc.text()) if not is_valid_email(x)]
         if bad_bcc:
