@@ -139,19 +139,21 @@ def unknown_tags(subject: str, body: str, headers: list[str]) -> list[str]:
 
 
 def match_individual_attachments(
-        rows: list[dict[str, str]], match_column: str,
+        rows: list[dict[str, str]], match_columns: str | list[str] | tuple[str, ...],
         file_paths: list[str]) -> tuple[dict[int, list[str]], list[str]]:
-    """列の値とファイル名を照合し、行番号ごとの添付ファイルを返す。
+    """1～複数列の値を「_」でつないでファイル名と照合する。
 
-    「山田商事」には、山田商事.pdf、山田商事_請求書.pdf、
-    山田商事-案内.pdf、山田商事 申込書.pdf が一致する。
+    「NO.」が「12」、「事業所名」が「山田商事」なら、
+    12_山田商事.pdf、12_山田商事_請求書.pdf などが一致する。
     """
+    columns = [match_columns] if isinstance(match_columns, str) else list(match_columns)
     result: dict[int, list[str]] = {}
     used: set[str] = set()
     for index, row in enumerate(rows):
-        key = row.get(match_column, "").strip()
-        if not key:
+        values = [row.get(column, "").strip() for column in columns]
+        if not columns or any(not value for value in values):
             continue
+        key = "_".join(values)
         matches = []
         for file_path in file_paths:
             stem = Path(file_path).stem.strip()

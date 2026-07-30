@@ -221,7 +221,7 @@ class ComposeTab(QWidget):
         self.rows: list[dict[str, str]] = []
         self.attachments: list[str] = []
         self.individual_attachments: dict[int, list[str]] = {}
-        self.individual_match_column = ""
+        self.individual_match_columns: list[str] = []
         self.individual_folder = ""
         self.filtered_indices: list[int] = []
         self.filter_indices: list[int] = []
@@ -398,7 +398,7 @@ class ComposeTab(QWidget):
         clear_individual = QPushButton("個別添付を解除")
         clear_individual.clicked.connect(self.clear_individual_attachments)
         self.individual_label = QLabel(
-            "未設定（事業所名などの列とファイル名を照合します）")
+            "未設定（2列の値を「_」でつないでファイル名と照合します）")
         individual_layout.addWidget(set_individual)
         individual_layout.addWidget(clear_individual)
         individual_layout.addWidget(self.individual_label, 1)
@@ -644,7 +644,7 @@ class ComposeTab(QWidget):
             return
         header = self.headers[column_index]
         self.rows[row_index][header] = item.text().strip()
-        if header == self.individual_match_column:
+        if header in self.individual_match_columns:
             self.clear_individual_attachments()
         if self.search_value.text().strip():
             self.update_visible_rows()
@@ -809,9 +809,19 @@ class ComposeTab(QWidget):
             QMessageBox.warning(
                 self, "個別添付", "先にExcel、CSVまたは保存済み名簿を開いてください。")
             return
-        column, ok = QInputDialog.getItem(
-            self, "個別添付の照合列", "ファイル名と照合する列:",
+        first_column, ok = QInputDialog.getItem(
+            self, "個別添付の照合列（1/2）", "ファイル名の1項目目:",
             self.headers, 0, False)
+        if not ok:
+            return
+        second_headers = [header for header in self.headers if header != first_column]
+        if not second_headers:
+            QMessageBox.warning(self, "個別添付", "照合には異なる2列が必要です。")
+            return
+        second_column, ok = QInputDialog.getItem(
+            self, "個別添付の照合列（2/2）",
+            f"「{first_column}_」に続く2項目目:",
+            second_headers, 0, False)
         if not ok:
             return
         folder = QFileDialog.getExistingDirectory(
@@ -823,20 +833,33 @@ class ComposeTab(QWidget):
             if path.is_file() and not path.name.startswith("~$")
         ]
         mapping, unmatched = match_individual_attachments(
-            self.rows, column, file_paths)
+            self.rows, [first_column, second_column], file_paths)
         self.individual_attachments = mapping
-        self.individual_match_column = column
+        self.individual_match_columns = [first_column, second_column]
         self.individual_folder = folder
         file_count = sum(len(paths) for paths in mapping.values())
         self.individual_label.setText(
-            f"{column}で照合：{len(mapping)}/{len(self.rows)}件に"
+            f"{first_column}_{second_column}で照合："
+            f"{len(mapping)}/{len(self.rows)}件に"
             f"{file_count}ファイルを割当")
         self.individual_label.setToolTip(
             f"フォルダ: {folder}\n未一致ファイル: {len(unmatched)}件")
         details = (
             f"{len(self.rows)}件中 {len(mapping)}件へ、"
-            f"合計{file_count}ファイルを割り当てました。"
+            f"合計{file_count}ファイルを割り当てました。\n"
+            f"照合形式: {first_column}_{second_column}\n\n割当一覧:\n"
         )
+        assignments = []
+        for index, paths in sorted(mapping.items()):
+            key = "_".join(
+                self.rows[index].get(column, "").strip()
+                for column in self.individual_match_columns)
+            assignments.append(
+                f"{index + 2}行目 {key}: "
+                + "、".join(Path(path).name for path in paths))
+        details += "\n".join(assignments[:20]) or "（割当なし）"
+        if len(assignments) > 20:
+            details += f"\nほか {len(assignments) - 20}件"
         if unmatched:
             preview = "\n".join(Path(path).name for path in unmatched[:10])
             details += f"\n\n一致しなかったファイル: {len(unmatched)}件\n{preview}"
@@ -846,11 +869,11 @@ class ComposeTab(QWidget):
 
     def clear_individual_attachments(self):
         self.individual_attachments = {}
-        self.individual_match_column = ""
+        self.individual_match_columns = []
         self.individual_folder = ""
         if hasattr(self, "individual_label"):
             self.individual_label.setText(
-                "未設定（事業所名などの列とファイル名を照合します）")
+                "未設定（2列の値を「_」でつないでファイル名と照合します）")
             self.individual_label.setToolTip("")
 
     def current_row(self) -> tuple[int, dict[str, str]] | None:
@@ -943,6 +966,33 @@ class ComposeTab(QWidget):
                 "共通添付と個別添付の合計が安全上限の2.5MBを超える行があります。\n\n"
                 + "\n".join(oversized_rows[:10]))
             return None
+        if self.individual_match_columns:
+            unassigned = [
+                index for index in target_indices
+                if not self.individual_attachments.get(index)
+            ]
+            if unassigned:
+                preview = []
+                for index in unassigned[:10]:
+                    key = "_".join(
+                        self.rows[index].get(column, "").strip()
+                        for column in self.individual_match_columns)
+                    preview.append(
+                        f"{index + 2}行目: {key or '（照合値が空欄）'}")
+                more = (
+                    f"\nほか {len(unassigned) - 10}件"
+                    if len(unassigned) > 10 else ""
+                )
+                answer = QMessageBox.question(
+                    self, "個別添付の未割当を確認",
+                    f"送信対象{len(target_indices)}件のうち、"
+                    f"{len(unassigned)}件に個別添付がありません。\n\n"
+                    + "\n".join(preview) + more
+                    + "\n\n個別添付なしのまま送信準備を続けますか？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if answer != QMessageBox.StandardButton.Yes:
+                    return None
         return [
             self.message_for(index, self.rows[index])
             for index in target_indices
@@ -981,11 +1031,21 @@ class ComposeTab(QWidget):
                 "設定タブで「サインイン／確認」を実行し、"
                 "送信アカウントを確認してから一括送信してください。")
             return
+        if self.individual_match_columns:
+            assigned_count = sum(
+                bool(self.individual_attachments.get(index))
+                for index in self.filtered_indices)
+            attachment_summary = (
+                f"個別添付: {assigned_count}/{len(self.filtered_indices)}件に割当済み\n"
+                f"照合: {'_'.join(self.individual_match_columns)}\n\n")
+        else:
+            attachment_summary = "個別添付: 未設定\n\n"
         answer = QMessageBox.question(
             self, "一括送信の最終確認",
             f"{len(messages)}件を1件ずつ個別送信します。\n\n"
             f"認証アカウント: {account}\n"
             f"差出人: {from_address}\n\n"
+            f"{attachment_summary}"
             "・案内の送信を了承している宛先ですか？\n"
             "・テスト送信で内容を確認しましたか？\n"
             "・不達になったアドレスを名簿から整理していますか？\n\n"

@@ -57,3 +57,17 @@ def test_match_individual_attachments_by_column_value(tmp_path):
         "事業所名", [str(exact), str(extra), str(other)])
     assert mapping == {0: sorted([str(exact), str(extra)])}
     assert unmatched == [str(other)]
+
+
+def test_match_individual_attachments_by_two_column_values(tmp_path):
+    exact = tmp_path / "12_山田商事.pdf"
+    extra = tmp_path / "12_山田商事_請求書.xlsx"
+    wrong = tmp_path / "13_山田商事.pdf"
+    for path in (exact, extra, wrong):
+        path.write_bytes(b"x")
+    mapping, unmatched = match_individual_attachments(
+        [{"NO.": "12", "事業所名": "山田商事"},
+         {"NO.": "13", "事業所名": ""}],
+        ["NO.", "事業所名"], [str(exact), str(extra), str(wrong)])
+    assert mapping == {0: sorted([str(exact), str(extra)])}
+    assert unmatched == [str(wrong)]
