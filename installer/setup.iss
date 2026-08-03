@@ -1,5 +1,5 @@
 #define MyAppName "差し込みメール送信"
-#define MyAppVersion "1.1.3"
+#define MyAppVersion "1.1.4"
 #define MyAppPublisher "四日市商工会議所"
 #define MyAppExeName "SashikomiMail.exe"
 

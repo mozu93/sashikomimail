@@ -12,6 +12,59 @@ EMAIL_RE = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$")
 TAG_RE = re.compile(r"\{([^{}]+)\}")
 CONDITIONAL_TAG_RE = re.compile(r"\{([^{}|]+)\|([^{}]*)\}")
 
+# よくある打ち間違いドメインと、想定される正しいドメイン。
+# これらは第三者が実際に取得してMXを運用している場合があり、
+# 誤送信しても配信不能通知が返らず、添付ファイルごと他人に届いてしまう。
+# 形式チェックでは検出できないため、名前で照合して送信前に警告する。
+TYPO_DOMAINS = {
+    "dokomo.ne.jp": "docomo.ne.jp",
+    "docomo.co.jp": "docomo.ne.jp",
+    "docomo.jp": "docomo.ne.jp",
+    "docomo.ne.jo": "docomo.ne.jp",
+    "docmo.ne.jp": "docomo.ne.jp",
+    "docoomo.ne.jp": "docomo.ne.jp",
+    "dcomo.ne.jp": "docomo.ne.jp",
+    "ezwed.ne.jp": "ezweb.ne.jp",
+    "ezweb.ne.jo": "ezweb.ne.jp",
+    "ezweb.co.jp": "ezweb.ne.jp",
+    "ezwbe.ne.jp": "ezweb.ne.jp",
+    "i.softbank.ne.jp": "i.softbank.jp",
+    "i.softbank.co.jp": "i.softbank.jp",
+    "softbank.jp": "softbank.ne.jp",
+    "softbnak.ne.jp": "softbank.ne.jp",
+    "gmai.com": "gmail.com",
+    "gmial.com": "gmail.com",
+    "gmali.com": "gmail.com",
+    "gmaill.com": "gmail.com",
+    "gnail.com": "gmail.com",
+    "gmail.con": "gmail.com",
+    "gmail.co.jp": "gmail.com",
+    "gmail.ne.jp": "gmail.com",
+    "yaho.co.jp": "yahoo.co.jp",
+    "yahho.co.jp": "yahoo.co.jp",
+    "yahoo.com.jp": "yahoo.co.jp",
+    "yahoo.co.jo": "yahoo.co.jp",
+    "yahoo.jp": "yahoo.co.jp",
+    "iclod.com": "icloud.com",
+    "icoud.com": "icloud.com",
+    "iclould.com": "icloud.com",
+    "icloud.co.jp": "icloud.com",
+    "hotmai.com": "hotmail.com",
+    "hotmial.com": "hotmail.com",
+    "homail.com": "hotmail.com",
+    "outlook.co.jp": "outlook.jp",
+    "outolook.jp": "outlook.jp",
+    "nifty.co.jp": "nifty.com",
+}
+
+# 携帯キャリアのメールドメイン。「なりすまし規制」「パソコンメール拒否」は
+# 送信側にエラーを返さずに破棄するため、不達に気づけない。
+CARRIER_DOMAINS = {
+    "docomo.ne.jp", "ezweb.ne.jp", "au.com", "i.softbank.jp", "softbank.ne.jp",
+    "vodafone.ne.jp", "disney.ne.jp", "ymobile.ne.jp", "y-mobile.ne.jp",
+    "willcom.com", "emnet.ne.jp", "pdx.ne.jp", "rakuten.jp",
+}
+
 
 @dataclass
 class ImportResult:
@@ -88,6 +141,32 @@ def split_addresses(value: str) -> list[str]:
 
 def is_valid_email(value: str) -> bool:
     return bool(EMAIL_RE.fullmatch(value.strip()))
+
+
+def domain_of(address: str) -> str:
+    return address.strip().rpartition("@")[2].casefold()
+
+
+def typo_domain_suspects(addresses: Iterable[str]) -> list[tuple[str, str]]:
+    """打ち間違いが疑われるアドレスと、想定される正しいドメインを返す。"""
+    suspects, seen = [], set()
+    for address in addresses:
+        value = address.strip()
+        correction = TYPO_DOMAINS.get(domain_of(value))
+        if correction and value.casefold() not in seen:
+            seen.add(value.casefold())
+            suspects.append((value, correction))
+    return suspects
+
+
+def carrier_domain_counts(addresses: Iterable[str]) -> dict[str, int]:
+    """携帯キャリア宛の件数をドメインごとに数え、多い順に返す。"""
+    counts: dict[str, int] = {}
+    for address in addresses:
+        domain = domain_of(address)
+        if domain in CARRIER_DOMAINS:
+            counts[domain] = counts.get(domain, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
 
 def validate_rows(rows: list[dict[str, str]], to_column: str,

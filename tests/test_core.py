@@ -3,8 +3,9 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from app.core import (
-    load_recipient_file, match_individual_attachments, render_template,
-    split_addresses, unknown_tags, validate_rows,
+    carrier_domain_counts, load_recipient_file, match_individual_attachments,
+    render_template, split_addresses, typo_domain_suspects, unknown_tags,
+    validate_rows,
 )
 
 
@@ -44,6 +45,25 @@ def test_split_addresses():
     assert split_addresses("a@example.jp; b@example.jp,c@example.jp") == [
         "a@example.jp", "b@example.jp", "c@example.jp"
     ]
+
+
+def test_typo_domain_suspects_flags_lookalike_domains():
+    addresses = [
+        "a@dokomo.ne.jp", "B@GMAI.COM", "c@docomo.ne.jp", "d@yahoo.ne.jp",
+        "a@dokomo.ne.jp",
+    ]
+    suspects = typo_domain_suspects(addresses)
+    # 正規のドメイン（docomo.ne.jp、Y!mobileのyahoo.ne.jp）は対象外。
+    # 同じアドレスの重複は1件にまとめる。
+    assert suspects == [("a@dokomo.ne.jp", "docomo.ne.jp"), ("B@GMAI.COM", "gmail.com")]
+
+
+def test_carrier_domain_counts_groups_by_domain():
+    addresses = [
+        "a@docomo.ne.jp", "b@docomo.ne.jp", "c@ezweb.ne.jp",
+        "d@example.co.jp", "e@gmail.com",
+    ]
+    assert carrier_domain_counts(addresses) == {"docomo.ne.jp": 2, "ezweb.ne.jp": 1}
 
 
 def test_match_individual_attachments_by_column_value(tmp_path):

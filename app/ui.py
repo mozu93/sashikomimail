@@ -16,8 +16,9 @@ from PyQt6.QtWidgets import (
 )
 
 from app.core import (
-    is_valid_email, load_recipient_file, match_individual_attachments,
-    render_template, split_addresses, unknown_tags, validate_rows,
+    carrier_domain_counts, is_valid_email, load_recipient_file,
+    match_individual_attachments, render_template, split_addresses,
+    typo_domain_suspects, unknown_tags, validate_rows,
 )
 from app.graph import (
     ATTACHMENT_LIMIT, get_access_token, get_cached_accounts, send_mail, sign_out,
@@ -60,6 +61,13 @@ class SendWorker(QThread):
     def cancel(self):
         self.cancelled = True
 
+    @staticmethod
+    def describe(message: dict) -> str:
+        """進捗表示用に、宛先と添付ファイル名を1行にまとめる。"""
+        names = "、".join(
+            Path(path).name for path in message.get("attachment_paths", []))
+        return f"宛先: {message['to_value']}　／　添付: {names or 'なし'}"
+
     def run(self):
         success = error = consecutive = 0
         try:
@@ -67,7 +75,10 @@ class SendWorker(QThread):
             for index, message in enumerate(self.messages, 1):
                 if self.cancelled:
                     break
-                self.progress.emit(index - 1, len(self.messages), f"{index}件目を送信中")
+                detail = self.describe(message)
+                total = len(self.messages)
+                self.progress.emit(
+                    index - 1, total, f"{index}/{total}件目を送信中　{detail}")
                 try:
                     graph_message = {
                         key: value for key, value in message.items()
@@ -76,18 +87,21 @@ class SendWorker(QThread):
                     send_mail(self.config, token, **graph_message)
                     success += 1
                     consecutive = 0
+                    result = "送信要求を受理"
                     self.logged.emit(message["row_number"], message["to_value"],
                                      message["subject"], "成功", "")
                 except Exception as exc:
                     error += 1
                     consecutive += 1
+                    result = "エラー"
                     self.logged.emit(message["row_number"], message["to_value"],
                                      message["subject"], "エラー", str(exc))
                     if consecutive >= 5:
                         self.failed.emit("5件連続で送信に失敗したため、安全のため中断しました。")
                         self.cancelled = True
                         break
-                self.progress.emit(index, len(self.messages), f"{index}/{len(self.messages)}件")
+                self.progress.emit(
+                    index, total, f"{index}/{total}件 {result}　{detail}")
                 if index < len(self.messages) and self.interval_ms:
                     self.msleep(self.interval_ms)
         except Exception as exc:
@@ -419,6 +433,16 @@ class ComposeTab(QWidget):
         splitter.addWidget(editor_scroll)
         splitter.setSizes([760, 520])
         root.addWidget(splitter, 1)
+
+        self.send_status = QLabel()
+        self.send_status.setWordWrap(True)
+        self.send_status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.send_status.setStyleSheet(
+            "QLabel { color:#174a78; background:#eef4fb; border:1px solid #cbd5e1;"
+            " border-radius:5px; padding:6px 9px; }")
+        self.send_status.hide()
+        root.addWidget(self.send_status)
 
         controls = QHBoxLayout()
         self.progress = QProgressBar()
@@ -979,6 +1003,57 @@ class ComposeTab(QWidget):
         )
         PreviewDialog(self, "送信プレビュー", content).exec()
 
+    def confirm_delivery_risks(self, target_rows: list[dict[str, str]]) -> bool:
+        """打ち間違いドメインと携帯キャリア宛を送信前に確認する。
+
+        どちらも形式は正しいためエラー検査では検出できず、
+        誤送信・不達になっても送信側にエラーが返らない。
+        """
+        addresses = []
+        for column in (self.to_column.currentText(), self.cc_column.currentText()):
+            if not column:
+                continue
+            for row in target_rows:
+                addresses.extend(split_addresses(row.get(column, "")))
+        suspects = typo_domain_suspects(addresses)
+        carriers = carrier_domain_counts(addresses)
+        if not suspects and not carriers:
+            return True
+        sections = []
+        if suspects:
+            listed = "\n".join(
+                f"　・{address}　→　{correction} の打ち間違いでは？"
+                for address, correction in suspects[:10])
+            more = (
+                f"\n　ほか {len(suspects) - 10}件"
+                if len(suspects) > 10 else ""
+            )
+            sections.append(
+                f"■ 打ち間違いが疑われるドメイン（{len(suspects)}件）\n"
+                f"{listed}{more}\n"
+                "　これらは第三者が実際に運用しているドメインの場合があり、\n"
+                "　誤送信しても配信不能通知が返りません。\n"
+                "　添付ファイルごと他人に届いたままになります。")
+        if carriers:
+            _settings, from_address = self.selected_sender_config()
+            sender_domain = (
+                from_address.rpartition("@")[2] if "@" in from_address
+                else "送信元"
+            )
+            listed = "、".join(
+                f"{domain} {count}件" for domain, count in carriers.items())
+            sections.append(
+                f"■ 携帯キャリア宛（合計{sum(carriers.values())}件）\n"
+                f"　{listed}\n"
+                "　「なりすまし規制」「パソコンメール拒否」が有効な回線では、\n"
+                "　送信側にエラーを返さないまま破棄されることがあります。\n"
+                f"　事前に {sender_domain} の指定受信設定をご案内ください。")
+        return QMessageBox.question(
+            self, "宛先の注意点を確認",
+            "\n\n".join(sections) + "\n\nこのまま送信準備を続けますか？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
+
     def preflight(self) -> list[dict] | None:
         if not self.rows:
             QMessageBox.warning(self, "確認", "宛先データを読み込んでください。")
@@ -1046,6 +1121,8 @@ class ComposeTab(QWidget):
                 self, "添付容量の上限",
                 "共通添付と個別添付の合計が安全上限の2.5MBを超える行があります。\n\n"
                 + "\n".join(oversized_rows[:10]))
+            return None
+        if not self.confirm_delivery_risks(target_rows):
             return None
         if self.individual_match_columns:
             unassigned = [
@@ -1155,6 +1232,8 @@ class ComposeTab(QWidget):
         self.worker.failed.connect(lambda text: QMessageBox.critical(self, "送信エラー", text))
         self.worker.completed.connect(lambda s, e, c: self.on_complete(s, e, c, test))
         self.progress.setRange(0, len(messages))
+        self.send_status.setText(f"0/{len(messages)}件　送信を開始します")
+        self.send_status.show()
         for widget in self.send_lock_widgets:
             widget.setEnabled(False)
         self.cancel_button.show()
@@ -1212,6 +1291,8 @@ class ComposeTab(QWidget):
         self.progress.setMaximum(total)
         self.progress.setValue(value)
         self.progress.setToolTip(text)
+        self.send_status.setText(text)
+        self.send_status.show()
 
     def on_logged(self, row_number: int, to_address: str, subject: str,
                   status: str, error: str, test: bool = False):
@@ -1237,7 +1318,19 @@ class ComposeTab(QWidget):
         self.cancel_button.hide()
         self.sending_state_changed.emit(False)
         status = "中断" if cancelled else "完了"
-        result = f"{status}\n成功: {success}件\nエラー: {error}件"
+        result = (
+            f"{status}\n"
+            f"送信要求の受理: {success}件\n"
+            f"エラー: {error}件\n\n"
+            "※「受理」はMicrosoft 365が送信要求を受け付けた状態です。\n"
+            "　相手に届いたことを保証するものではありません。\n"
+            "　受信側の迷惑メール判定や、携帯キャリアのなりすまし規制で\n"
+            "　エラーが返らないまま破棄される場合があります。"
+        )
+        self.send_status.setText(
+            f"{status}　送信要求の受理: {success}件／エラー: {error}件"
+            "（受理は到達を保証しません）")
+        self.send_status.show()
         if self.send_errors:
             result += "\n\nエラー詳細:\n" + "\n\n".join(self.send_errors[:10])
             if len(self.send_errors) > 10:
@@ -1318,7 +1411,7 @@ class HistoryTab(QWidget):
         layout = QVBoxLayout(self)
         self.jobs = QTableWidget(0, 8)
         self.jobs.setHorizontalHeaderLabels(
-            ["種別", "日時", "ファイル", "件名", "総数", "成功", "エラー", "状態"])
+            ["種別", "日時", "ファイル", "件名", "総数", "受理", "エラー", "状態"])
         self.jobs.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.jobs.itemSelectionChanged.connect(self.show_logs)
         self.logs = QTableWidget(0, 5)
@@ -1336,7 +1429,12 @@ class HistoryTab(QWidget):
         buttons.addStretch()
         buttons.addWidget(retry)
         buttons.addWidget(delete)
-        layout.addWidget(QLabel("送信履歴（エラー宛先は内容を確認後、元データを修正して再送信できます）"))
+        note = QLabel(
+            "送信履歴（エラー宛先は内容を確認後、元データを修正して再送信できます）\n"
+            "「受理」はMicrosoft 365が送信要求を受け付けた件数です。"
+            "相手への到達を保証するものではありません。")
+        note.setWordWrap(True)
+        layout.addWidget(note)
         layout.addWidget(splitter)
         layout.addLayout(buttons)
 
@@ -1364,6 +1462,9 @@ class HistoryTab(QWidget):
         self.logs.setRowCount(len(logs))
         for r, log in enumerate(logs):
             for c, value in enumerate(log):
+                # 結果列の「成功」は受理の意味なので、表示だけ言い換える。
+                if c == 3 and value == "成功":
+                    value = "受理"
                 self.logs.setItem(r, c, QTableWidgetItem(str(value)))
 
     def delete_selected(self):
@@ -1538,6 +1639,13 @@ class SettingsTab(QWidget):
         form.addRow("テナントID", self.tenant)
         form.addRow("クライアントID", self.client)
         form.addRow("代理差出人（任意）", self.from_address)
+        ndr_notice = QLabel(
+            "代理差出人を設定すると、配信不能通知（NDR）と返信は\n"
+            "認証アカウントではなく代理差出人のアドレスに届きます。\n"
+            "不達を見落とさないよう、そちらの受信トレイも確認してください。")
+        ndr_notice.setWordWrap(True)
+        ndr_notice.setStyleSheet("color:#713f12; background:#fef9c3; padding:6px 9px;")
+        form.addRow("", ndr_notice)
         form.addRow("テスト送信先", self.test_address)
         account_row = QHBoxLayout()
         account_row.addWidget(self.account, 1)
