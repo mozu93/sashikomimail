@@ -30,21 +30,71 @@ from app.updater import (
 )
 from app.version import __version__
 
+# 背景色を指定した箇所には必ず文字色も指定する。
+# 文字色を省略するとOSのダークモード時にパレット由来の白文字が使われ、
+# 白背景に白文字となって読めなくなる。
 APP_STYLE = """
-QMainWindow { background: #f4f7fb; }
+QWidget { color: #1f2937; }
+QMainWindow, QDialog { background: #f4f7fb; }
 QGroupBox { font-weight: bold; border: 1px solid #cbd5e1; border-radius: 7px;
-            margin-top: 10px; padding-top: 12px; background: white; }
+            margin-top: 10px; padding-top: 12px; background: white; color: #1f2937; }
 QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; color: #174a78; }
 QPushButton { min-height: 28px; padding: 2px 12px; border-radius: 5px;
-              border: 1px solid #9ca3af; background: #fff; }
+              border: 1px solid #9ca3af; background: #fff; color: #1f2937; }
 QPushButton:hover { background: #edf4fb; }
+QPushButton:disabled { background: #f1f3f5; color: #9ca3af; border-color: #cbd5e1; }
 QPushButton#primary { color: white; background: #1769aa; border-color: #1769aa; font-weight: bold; }
 QPushButton#danger { color: white; background: #b42318; border-color: #b42318; }
 QLineEdit, QComboBox, QPlainTextEdit, QSpinBox { border: 1px solid #aab4c0; border-radius: 4px;
-                                               padding: 4px; background: white; }
-QTabBar::tab { min-width: 120px; padding: 9px 16px; }
-QHeaderView::section { background: #dce9f5; padding: 5px; border: 0; border-right: 1px solid #c4d3e0; }
+                                               padding: 4px; background: white; color: #1f2937; }
+QLineEdit:disabled, QComboBox:disabled, QPlainTextEdit:disabled, QSpinBox:disabled {
+    background: #f1f3f5; color: #9ca3af; }
+QComboBox QAbstractItemView { background: white; color: #1f2937;
+                              border: 1px solid #aab4c0; outline: 0;
+                              selection-background-color: #1769aa; selection-color: white; }
+QListWidget, QListView, QTableWidget, QTableView, QTreeView {
+    background: white; color: #1f2937; alternate-background-color: #f7fafd;
+    selection-background-color: #1769aa; selection-color: white; }
+QPlainTextEdit { selection-background-color: #1769aa; selection-color: white; }
+QTabWidget::pane { border: 1px solid #cbd5e1; background: white; }
+QScrollArea { background: #f4f7fb; border: 0; }
+QScrollArea > QWidget > QWidget { background: #f4f7fb; }
+QScrollBar:vertical, QScrollBar:horizontal { background: #eef2f7; border: 0; }
+QScrollBar::handle { background: #b6c2cf; border-radius: 4px; min-height: 24px;
+                     min-width: 24px; }
+QScrollBar::handle:hover { background: #94a3b8; }
+QScrollBar::add-line, QScrollBar::sub-line { background: none; border: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: none; }
+QSplitter::handle { background: #dbe4ee; }
+QTabBar::tab { min-width: 120px; padding: 9px 16px; background: #e6edf5; color: #1f2937; }
+QTabBar::tab:selected { background: white; color: #174a78; font-weight: bold; }
+QTabBar::tab:disabled { color: #9ca3af; }
+QHeaderView::section { background: #dce9f5; color: #174a78; padding: 5px; border: 0;
+                       border-right: 1px solid #c4d3e0; }
+QProgressBar { border: 1px solid #aab4c0; border-radius: 4px; background: white;
+               color: #1f2937; text-align: center; }
+QProgressBar::chunk { background: #9dc4e4; }
+QMenu { background: white; color: #1f2937; border: 1px solid #aab4c0; }
+QMenu::item:selected { background: #1769aa; color: white; }
+QToolTip { background: #ffffe1; color: #1f2937; border: 1px solid #9ca3af; }
 """
+
+
+class NoWheelComboBox(QComboBox):
+    """マウスホイールでは選択が変わらないコンボボックス。
+
+    スクロール領域の中にあるため、画面を読むためのスクロールで
+    選択値が入れ替わり、誤入力につながる。ホイールイベントは
+    無視して親へ渡し、コンボボックスの上でも画面側がスクロールする。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 既定のWheelFocusだと、ホイールだけでフォーカスが移ってしまう。
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 class SendWorker(QThread):
@@ -334,12 +384,12 @@ class ComposeTab(QWidget):
         editor_layout = QVBoxLayout(editor)
         destination = QGroupBox("3. 宛先設定")
         form = QFormLayout(destination)
-        self.to_column, self.cc_column = QComboBox(), QComboBox()
+        self.to_column, self.cc_column = NoWheelComboBox(), NoWheelComboBox()
         self.to_column.currentTextChanged.connect(self.on_validation_columns_changed)
         self.cc_column.currentTextChanged.connect(self.on_validation_columns_changed)
         self.bcc = QLineEdit()
         self.bcc.setPlaceholderText("複数指定は ; または , で区切る")
-        self.sender = QComboBox()
+        self.sender = NoWheelComboBox()
         self.sender.setToolTip("この送信で使用する差出人を選択します")
         form.addRow("To列（必須）", self.to_column)
         form.addRow("CC列（任意）", self.cc_column)
@@ -351,7 +401,7 @@ class ComposeTab(QWidget):
         template = QGroupBox("4. 件名・本文")
         template_layout = QVBoxLayout(template)
         row = QHBoxLayout()
-        self.template_combo = QComboBox()
+        self.template_combo = NoWheelComboBox()
         load = QPushButton("読込")
         load.clicked.connect(self.load_template)
         save = QPushButton("現在の件名・本文をテンプレート登録")
@@ -365,14 +415,14 @@ class ComposeTab(QWidget):
         self.subject.setPlaceholderText("件名にも {列名} を使用できます")
         self.body = QPlainTextEdit()
         self.body.setPlaceholderText("本文を入力してください。例：{参加者名} 様")
-        self.body.setMinimumHeight(150)
+        self.body.setMinimumHeight(225)
         template_layout.addLayout(row)
         template_layout.addWidget(QLabel("件名"))
         template_layout.addWidget(self.subject)
         template_layout.addWidget(QLabel("本文"))
         template_layout.addWidget(self.body)
         signature_row = QHBoxLayout()
-        self.signature_combo = QComboBox()
+        self.signature_combo = NoWheelComboBox()
         self.signature_combo.setToolTip("選択した署名を送信時に本文末尾へ追加します")
         signature_row.addWidget(QLabel("署名"))
         signature_row.addWidget(self.signature_combo, 1)
@@ -666,12 +716,14 @@ class ComposeTab(QWidget):
                         + error_detail)
                     cell.setBackground(
                         QColor("#fef3c7") if approved else QColor("#fee2e2"))
+                    cell.setForeground(QColor("#1f2937"))
             else:
                 item.setText("OK")
                 for column in range(self.table.columnCount()):
                     cell = self.table.item(row_index, column)
                     cell.setToolTip("")
                     cell.setBackground(QColor("white"))
+                    cell.setForeground(QColor("#1f2937"))
         self._updating_table = False
         self.summary.setText(
             f"表示・送信対象 {len(indices)}件 / 全{len(self.rows)}件"
