@@ -170,10 +170,19 @@ def carrier_domain_counts(addresses: Iterable[str]) -> dict[str, int]:
 
 
 def validate_rows(rows: list[dict[str, str]], to_column: str,
-                  cc_column: str = "") -> dict[int, list[str]]:
+                  cc_column: str = "",
+                  row_numbers: list[int] | None = None) -> dict[int, list[str]]:
+    """rowsを検査し、rowsの位置をキーにしたエラー一覧を返す。
+
+    絞り込み後の一部だけを渡す場合、row_numbersに各行の実際の
+    Excel / CSV行番号を渡す。省略すると先頭行を2行目として数える。
+    重複メッセージの行番号がrows内の並び順基準になると、
+    絞り込みの有無で文言が変わり、確認済みの許可が外れてしまう。
+    """
     errors: dict[int, list[str]] = {}
     seen: dict[str, int] = {}
     for index, row in enumerate(rows):
+        line = row_numbers[index] if row_numbers else index + 2
         issues = []
         recipients = split_addresses(row.get(to_column, ""))
         if not recipients:
@@ -183,9 +192,9 @@ def validate_rows(rows: list[dict[str, str]], to_column: str,
         for address in recipients:
             key = address.casefold()
             if key in seen:
-                issues.append(f"宛先が{seen[key] + 2}行目と重複しています")
+                issues.append(f"宛先が{seen[key]}行目と重複しています")
             else:
-                seen[key] = index
+                seen[key] = line
         if cc_column:
             cc = split_addresses(row.get(cc_column, ""))
             if any(not is_valid_email(address) for address in cc):

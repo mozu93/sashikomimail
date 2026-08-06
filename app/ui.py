@@ -45,6 +45,11 @@ QPushButton:hover { background: #edf4fb; }
 QPushButton:disabled { background: #f1f3f5; color: #9ca3af; border-color: #cbd5e1; }
 QPushButton#primary { color: white; background: #1769aa; border-color: #1769aa; font-weight: bold; }
 QPushButton#danger { color: white; background: #b42318; border-color: #b42318; }
+/* ID指定は :disabled より優先されるため、無効時の配色もID付きで指定する。
+   省略すると送信中でも一括送信ボタンが青いままとなり、
+   押せない状態なのか見分けがつかなくなる。 */
+QPushButton#primary:disabled, QPushButton#danger:disabled {
+    background: #f1f3f5; color: #9ca3af; border-color: #cbd5e1; }
 QLineEdit, QComboBox, QPlainTextEdit, QSpinBox { border: 1px solid #aab4c0; border-radius: 4px;
                                                padding: 4px; background: white; color: #1f2937; }
 QLineEdit:disabled, QComboBox:disabled, QPlainTextEdit:disabled, QSpinBox:disabled {
@@ -694,7 +699,8 @@ class ComposeTab(QWidget):
         indices = self.filtered_indices or []
         target_rows = [self.rows[index] for index in indices]
         subset_errors = validate_rows(
-            target_rows, self.to_column.currentText(), self.cc_column.currentText())
+            target_rows, self.to_column.currentText(), self.cc_column.currentText(),
+            [index + 2 for index in indices])
         errors = {indices[index]: value for index, value in subset_errors.items()}
         self.validation_errors = errors
         self._updating_table = True
@@ -1116,7 +1122,8 @@ class ComposeTab(QWidget):
             return None
         target_rows = [self.rows[index] for index in target_indices]
         errors = validate_rows(
-            target_rows, self.to_column.currentText(), self.cc_column.currentText())
+            target_rows, self.to_column.currentText(), self.cc_column.currentText(),
+            [index + 2 for index in target_indices])
         unapproved_errors = {
             target_indices[index]: issues
             for index, issues in errors.items()

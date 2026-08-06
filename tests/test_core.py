@@ -37,8 +37,17 @@ def test_validate_rows_detects_invalid_and_duplicate():
     rows = [{"mail": "a@example.jp"}, {"mail": "a@example.jp"}, {"mail": "bad"}]
     errors = validate_rows(rows, "mail")
     assert 0 not in errors
-    assert "重複" in errors[1][0]
+    assert errors[1] == ["宛先が2行目と重複しています"]
     assert 2 in errors
+
+
+def test_validate_rows_uses_actual_row_numbers_when_filtered():
+    # 絞り込みで1・9・10行目だけを渡した場合、重複メッセージは
+    # 渡した並び順ではなく実際のExcel行番号を指す。
+    rows = [{"mail": "z@example.jp"}, {"mail": "a@example.jp"},
+            {"mail": "a@example.jp"}]
+    errors = validate_rows(rows, "mail", "", [2, 9, 10])
+    assert errors == {2: ["宛先が9行目と重複しています"]}
 
 
 def test_split_addresses():
