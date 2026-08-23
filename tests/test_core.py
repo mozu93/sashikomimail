@@ -1,11 +1,11 @@
 from pathlib import Path
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from app.core import (
-    carrier_domain_counts, load_recipient_file, match_individual_attachments,
-    render_template, split_addresses, typo_domain_suspects, unknown_tags,
-    validate_rows,
+    carrier_domain_counts, export_recipient_file, load_recipient_file,
+    match_individual_attachments, render_template, split_addresses,
+    typo_domain_suspects, unknown_tags, validate_rows,
 )
 
 
@@ -21,6 +21,24 @@ def test_load_xlsx_and_normalize(tmp_path: Path):
     assert result.rows[0]["人数"] == "2"
 
 
+def test_export_recipient_file_writes_headers_and_rows(tmp_path: Path):
+    path = tmp_path / "out.xlsx"
+    headers = ["氏名", "メール"]
+    rows = [
+        {"氏名": "山田", "メール": "a@example.jp"},
+        {"氏名": "佐藤", "メール": "b@example.jp"},
+    ]
+    export_recipient_file(str(path), headers, rows)
+    book = load_workbook(path)
+    sheet = book.active
+    values = [list(row) for row in sheet.iter_rows(values_only=True)]
+    assert values == [
+        ["氏名", "メール"],
+        ["山田", "a@example.jp"],
+        ["佐藤", "b@example.jp"],
+    ]
+
+
 def test_render_keeps_unknown_tags():
     assert render_template("{氏名} 様 {不明}", {"氏名": "山田"}) == "山田 様 {不明}"
     assert unknown_tags("", "{氏名}{不明}", ["氏名"]) == ["不明"]
@@ -31,6 +49,16 @@ def test_conditional_suffix_tag_hides_suffix_when_value_is_empty():
     assert render_template(template, {"氏名": "山田", "氏名2": "佐藤"}) == "山田 様\n佐藤 様"
     assert render_template(template, {"氏名": "山田", "氏名2": ""}) == "山田 様\n"
     assert unknown_tags("", template, ["氏名", "氏名2"]) == []
+
+
+def test_conditional_prefix_suffix_tag_hides_separator_when_value_is_empty():
+    template = "{氏名A}様{、|氏名B|様}"
+    assert render_template(
+        template, {"氏名A": "山田", "氏名B": "佐藤"}) == "山田様、佐藤様"
+    assert render_template(
+        template, {"氏名A": "山田", "氏名B": ""}) == "山田様"
+    assert unknown_tags("", template, ["氏名A", "氏名B"]) == []
+    assert unknown_tags("", "{、|不明|様}", ["氏名A"]) == ["不明"]
 
 
 def test_validate_rows_detects_invalid_and_duplicate():

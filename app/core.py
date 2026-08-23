@@ -6,11 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 EMAIL_RE = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$")
 TAG_RE = re.compile(r"\{([^{}]+)\}")
 CONDITIONAL_TAG_RE = re.compile(r"\{([^{}|]+)\|([^{}]*)\}")
+CONDITIONAL_PREFIX_SUFFIX_TAG_RE = re.compile(r"\{([^{}|]*)\|([^{}|]+)\|([^{}]*)\}")
 
 # よくある打ち間違いドメインと、想定される正しいドメイン。
 # これらは第三者が実際に取得してMXを運用している場合があり、
@@ -135,6 +136,15 @@ def load_recipient_file(path: str) -> ImportResult:
     return ImportResult(headers, rows, warnings)
 
 
+def export_recipient_file(path: str, headers: list[str], rows: list[dict[str, str]]) -> None:
+    book = Workbook()
+    sheet = book.active
+    sheet.append(headers)
+    for row in rows:
+        sheet.append([row.get(header, "") for header in headers])
+    book.save(path)
+
+
 def split_addresses(value: str) -> list[str]:
     return [item.strip() for item in re.split(r"[,;\n]", value or "") if item.strip()]
 
@@ -205,6 +215,15 @@ def validate_rows(rows: list[dict[str, str]], to_column: str,
 
 
 def render_template(template: str, row: dict[str, str]) -> str:
+    # {前置文字|列名|後置文字} は値がある場合だけ「前置＋値＋後置」を出力する。
+    # 例: {、|氏名2|様} → "、佐藤様" または空文字
+    template = CONDITIONAL_PREFIX_SUFFIX_TAG_RE.sub(
+        lambda match: (
+            match.group(1) + row.get(match.group(2), "") + match.group(3)
+            if row.get(match.group(2), "") else ""
+        ),
+        template,
+    )
     # {列名|後置文字} は値がある場合だけ「値＋後置文字」を出力する。
     # 例: {氏名2| 様} → "佐藤 様" または空文字
     template = CONDITIONAL_TAG_RE.sub(
@@ -219,10 +238,10 @@ def render_template(template: str, row: dict[str, str]) -> str:
 
 def unknown_tags(subject: str, body: str, headers: list[str]) -> list[str]:
     source = subject + "\n" + body
-    tags = {
-        tag.split("|", 1)[0]
-        for tag in TAG_RE.findall(source)
-    }
+    tags = set()
+    for tag in TAG_RE.findall(source):
+        parts = tag.split("|")
+        tags.add(parts[1] if len(parts) >= 3 else parts[0])
     return sorted(tags.difference(headers))
 
 

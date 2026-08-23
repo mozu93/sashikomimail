@@ -44,6 +44,9 @@ class Storage:
                 CREATE TABLE IF NOT EXISTS signatures(
                     id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
                     body TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS cc_contacts(
+                    id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+                    email TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS send_targets(
                     id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL,
                     row_number INTEGER NOT NULL, to_address TEXT NOT NULL,
@@ -91,9 +94,15 @@ class Storage:
             ).fetchall()
         return [dict(zip(("id", "name", "subject", "body", "updated_at"), row)) for row in rows]
 
-    def save_template(self, name: str, subject: str, body: str) -> None:
+    def save_template(self, name: str, subject: str, body: str,
+                      template_id: int | None = None) -> None:
         now = datetime.now().isoformat(timespec="seconds")
         with self.connect() as db:
+            if template_id is not None:
+                db.execute(
+                    "UPDATE templates SET name=?,subject=?,body=?,updated_at=? WHERE id=?",
+                    (name, subject, body, now, template_id))
+                return
             db.execute("""INSERT INTO templates(name,subject,body,updated_at)
                 VALUES(?,?,?,?) ON CONFLICT(name) DO UPDATE SET
                 subject=excluded.subject,body=excluded.body,updated_at=excluded.updated_at""",
@@ -157,6 +166,36 @@ class Storage:
     def delete_signature(self, signature_id: int) -> None:
         with self.connect() as db:
             db.execute("DELETE FROM signatures WHERE id=?", (signature_id,))
+
+    def cc_contacts(self) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id,name,email,updated_at FROM cc_contacts ORDER BY name"
+            ).fetchall()
+        return [
+            {"id": row[0], "name": row[1], "email": unprotect_text(row[2]),
+             "updated_at": row[3]}
+            for row in rows
+        ]
+
+    def save_cc_contact(self, name: str, email: str,
+                        contact_id: int | None = None) -> None:
+        now = datetime.now().isoformat(timespec="seconds")
+        protected_email = protect_text(email)
+        with self.connect() as db:
+            if contact_id is not None:
+                db.execute(
+                    "UPDATE cc_contacts SET name=?,email=?,updated_at=? WHERE id=?",
+                    (name, protected_email, now, contact_id))
+                return
+            db.execute("""INSERT INTO cc_contacts(name,email,updated_at)
+                VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET
+                email=excluded.email,updated_at=excluded.updated_at""",
+                (name, protected_email, now))
+
+    def delete_cc_contact(self, contact_id: int) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM cc_contacts WHERE id=?", (contact_id,))
 
     def settings(self) -> dict:
         with self.connect() as db:

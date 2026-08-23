@@ -34,6 +34,20 @@ def test_test_send_job_is_persisted_with_type(tmp_path):
     assert storage.logs(job_id)[0][3] == "成功"
 
 
+def test_template_round_trip_update_by_id_and_delete(tmp_path):
+    storage = Storage(str(tmp_path / "template.db"))
+    storage.save_template("案内", "件名A", "本文A")
+    template = storage.templates()[0]
+    assert template["subject"] == "件名A"
+    storage.save_template("案内", "件名B", "本文B")
+    assert storage.templates()[0]["subject"] == "件名B"
+    storage.save_template("案内2", "件名C", "本文C", template["id"])
+    assert storage.templates()[0]["name"] == "案内2"
+    assert storage.templates()[0]["subject"] == "件名C"
+    storage.delete_template(template["id"])
+    assert storage.templates() == []
+
+
 def test_signature_round_trip_update_and_delete(tmp_path):
     storage = Storage(str(tmp_path / "signature.db"))
     storage.save_signature("総務", "○○商工会議所\n総務部")
@@ -45,6 +59,23 @@ def test_signature_round_trip_update_and_delete(tmp_path):
     assert storage.signatures()[0]["name"] == "総務部"
     storage.delete_signature(signature["id"])
     assert storage.signatures() == []
+
+
+def test_cc_contact_round_trip_update_delete_and_encrypted(tmp_path):
+    storage = Storage(str(tmp_path / "cc_contacts.db"))
+    storage.save_cc_contact("山田部長", "yamada@example.jp")
+    contact = storage.cc_contacts()[0]
+    assert contact["email"] == "yamada@example.jp"
+    storage.save_cc_contact("山田部長", "yamada2@example.jp")
+    assert storage.cc_contacts()[0]["email"] == "yamada2@example.jp"
+    storage.save_cc_contact("山田本部長", "yamada2@example.jp", contact["id"])
+    assert storage.cc_contacts()[0]["name"] == "山田本部長"
+    with storage.connect() as db:
+        raw = db.execute("SELECT email FROM cc_contacts").fetchone()[0]
+    assert raw.startswith("dpapi:")
+    assert "yamada2@example.jp" not in raw
+    storage.delete_cc_contact(contact["id"])
+    assert storage.cc_contacts() == []
 
 
 def test_pending_and_failed_targets_can_be_retried(tmp_path):

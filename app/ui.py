@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import threading
 import webbrowser
+from datetime import date
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
@@ -10,15 +11,15 @@ from PyQt6.QtGui import QColor, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog, QFormLayout,
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
-    QInputDialog, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QScrollArea, QSpinBox,
+    QListWidgetItem, QInputDialog, QMainWindow, QMessageBox, QPlainTextEdit,
+    QProgressBar, QPushButton, QScrollArea, QSpinBox,
     QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from app.core import (
-    carrier_domain_counts, is_valid_email, load_recipient_file,
-    match_individual_attachments, render_template, split_addresses,
-    typo_domain_suspects, unknown_tags, validate_rows,
+    carrier_domain_counts, export_recipient_file, is_valid_email,
+    load_recipient_file, match_individual_attachments, render_template,
+    split_addresses, typo_domain_suspects, unknown_tags, validate_rows,
 )
 from app.graph import (
     ATTACHMENT_LIMIT, get_access_token, get_cached_accounts, send_mail, sign_out,
@@ -185,6 +186,79 @@ class PreviewDialog(QDialog):
         layout.addWidget(close)
 
 
+class ConditionalTagDialog(QDialog):
+    def __init__(self, parent, headers: list[str]):
+        super().__init__(parent)
+        self.setWindowTitle("条件付きタグを挿入")
+        self.resize(420, 260)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "選んだ列にデータがある行だけ、前後に付けた文字も含めて挿入します。\n"
+            "データが空欄の行では、タグも前後の文字も何も表示されません。"))
+        form = QFormLayout()
+        self.column = NoWheelComboBox()
+        self.column.addItems(headers)
+        self.prefix = QLineEdit()
+        self.prefix.setPlaceholderText("例：、（省略可）")
+        self.suffix = QLineEdit()
+        self.suffix.setPlaceholderText("例： 様（省略可）")
+        form.addRow("差し込む列", self.column)
+        form.addRow("前に付ける文字", self.prefix)
+        form.addRow("後に付ける文字", self.suffix)
+        layout.addLayout(form)
+        buttons = QHBoxLayout()
+        ok = QPushButton("挿入")
+        ok.setObjectName("primary")
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("キャンセル")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(ok)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+
+    def tag_text(self) -> str:
+        column = self.column.currentText()
+        prefix = self.prefix.text()
+        suffix = self.suffix.text()
+        if not prefix and not suffix:
+            return f"{{{column}}}"
+        return f"{{{prefix}|{column}|{suffix}}}"
+
+
+class ContactPickerDialog(QDialog):
+    def __init__(self, parent, contacts: list[dict]):
+        super().__init__(parent)
+        self.setWindowTitle("連絡先から追加")
+        self.resize(420, 420)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("追加する連絡先にチェックを付けてください。"))
+        self.list = QListWidget()
+        for contact in contacts:
+            item = QListWidgetItem(f"{contact['name']}（{contact['email']}）")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            item.setData(256, contact)
+            self.list.addItem(item)
+        layout.addWidget(self.list, 1)
+        buttons = QHBoxLayout()
+        ok = QPushButton("追加")
+        ok.setObjectName("primary")
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("キャンセル")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(ok)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+
+    def selected_emails(self) -> list[str]:
+        emails = []
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            if item.checkState() == Qt.CheckState.Checked:
+                emails.append(item.data(256)["email"])
+        return emails
+
+
 class UpdateBanner(QWidget):
     update_found = pyqtSignal(dict)
     download_progress = pyqtSignal(int, int)
@@ -294,6 +368,8 @@ class ComposeTab(QWidget):
         self.individual_folder = ""
         self.filtered_indices: list[int] = []
         self.filter_indices: list[int] = []
+        self.included_rows: set[int] = set()
+        self.active_filter_desc: str = ""
         self.source_path = ""
         self.recipient_display_name = ""
         self._updating_table = False
@@ -320,12 +396,16 @@ class ComposeTab(QWidget):
         open_list.clicked.connect(self.open_recipient_list)
         delete_list = QPushButton("保存済み名簿を削除")
         delete_list.clicked.connect(self.delete_recipient_list)
+        export_button = QPushButton("Excelとして出力")
+        export_button.setToolTip("セル編集や行削除を反映した現在のデータをExcelファイルに出力します")
+        export_button.clicked.connect(self.export_recipient_data)
         source_layout.addWidget(choose, 0, 0)
         source_layout.addWidget(open_list, 0, 1)
         source_layout.addWidget(save_list, 0, 2)
         source_layout.addWidget(delete_list, 0, 3)
-        source_layout.addWidget(self.file_label, 1, 0, 1, 4)
-        source_layout.setColumnStretch(4, 1)
+        source_layout.addWidget(export_button, 0, 4)
+        source_layout.addWidget(self.file_label, 1, 0, 1, 5)
+        source_layout.setColumnStretch(5, 1)
         root.addWidget(source)
 
         splitter = QSplitter()
@@ -340,23 +420,21 @@ class ComposeTab(QWidget):
         self.filter_operator.currentTextChanged.connect(self.update_filter_input_state)
         self.filter_value = QLineEdit()
         self.filter_value.setPlaceholderText("絞り込む文字を入力")
+        self.filter_value.setClearButtonEnabled(True)
         self.filter_value.returnPressed.connect(self.apply_filter)
+        self.filter_value.textChanged.connect(self.on_filter_value_changed)
         apply_filter_button = QPushButton("絞り込み")
         apply_filter_button.clicked.connect(self.apply_filter)
-        clear_filter_button = QPushButton("解除")
-        clear_filter_button.clicked.connect(self.clear_filter)
         filter_row.addWidget(QLabel("列"))
         filter_row.addWidget(self.filter_column)
         filter_row.addWidget(self.filter_operator)
         filter_row.addWidget(self.filter_value, 1)
         filter_row.addWidget(apply_filter_button)
-        filter_row.addWidget(clear_filter_button)
         search_row = QHBoxLayout()
         self.search_value = QLineEdit()
         self.search_value.setPlaceholderText("全列から検索（入力するとすぐに反映）")
+        self.search_value.setClearButtonEnabled(True)
         self.search_value.textChanged.connect(self.update_visible_rows)
-        clear_search_button = QPushButton("検索をクリア")
-        clear_search_button.clicked.connect(self.search_value.clear)
         delete_row_button = QPushButton("選択行を削除")
         delete_row_button.setObjectName("danger")
         delete_row_button.clicked.connect(self.delete_selected_row)
@@ -366,10 +444,12 @@ class ComposeTab(QWidget):
         approve_error_button.clicked.connect(self.approve_selected_row_errors)
         search_row.addWidget(QLabel("検索"))
         search_row.addWidget(self.search_value, 1)
-        search_row.addWidget(clear_search_button)
         search_row.addWidget(approve_error_button)
         search_row.addWidget(delete_row_button)
         self.summary = QLabel("0件")
+        self.active_filter_label = QLabel("")
+        self.active_filter_label.setStyleSheet("color: #b45309; font-weight: bold;")
+        self.active_filter_label.setVisible(False)
         self.table = QTableWidget()
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked
@@ -378,9 +458,11 @@ class ComposeTab(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.itemChanged.connect(self.on_table_item_changed)
-        preview_layout.addLayout(filter_row)
+        self.table.horizontalHeader().sectionClicked.connect(self.on_status_header_clicked)
         preview_layout.addLayout(search_row)
+        preview_layout.addLayout(filter_row)
         preview_layout.addWidget(self.summary)
+        preview_layout.addWidget(self.active_filter_label)
         preview_layout.addWidget(self.table)
         left_layout.addWidget(preview_box)
         splitter.addWidget(left)
@@ -389,16 +471,29 @@ class ComposeTab(QWidget):
         editor_layout = QVBoxLayout(editor)
         destination = QGroupBox("3. 宛先設定")
         form = QFormLayout(destination)
-        self.to_column, self.cc_column = NoWheelComboBox(), NoWheelComboBox()
+        self.to_column = NoWheelComboBox()
         self.to_column.currentTextChanged.connect(self.on_validation_columns_changed)
-        self.cc_column.currentTextChanged.connect(self.on_validation_columns_changed)
+        self.fixed_cc = QLineEdit()
+        self.fixed_cc.setPlaceholderText("複数指定は ; または , で区切る")
+        fixed_cc_pick = QPushButton("連絡先")
+        fixed_cc_pick.setToolTip("「連絡先」タブに登録した連絡先から選んで追記します")
+        fixed_cc_pick.clicked.connect(lambda: self.pick_contacts(self.fixed_cc))
+        fixed_cc_row = QHBoxLayout()
+        fixed_cc_row.addWidget(self.fixed_cc, 1)
+        fixed_cc_row.addWidget(fixed_cc_pick)
         self.bcc = QLineEdit()
         self.bcc.setPlaceholderText("複数指定は ; または , で区切る")
+        bcc_pick = QPushButton("連絡先")
+        bcc_pick.setToolTip("「連絡先」タブに登録した連絡先から選んで追記します")
+        bcc_pick.clicked.connect(lambda: self.pick_contacts(self.bcc))
+        bcc_row = QHBoxLayout()
+        bcc_row.addWidget(self.bcc, 1)
+        bcc_row.addWidget(bcc_pick)
         self.sender = NoWheelComboBox()
         self.sender.setToolTip("この送信で使用する差出人を選択します")
         form.addRow("To列（必須）", self.to_column)
-        form.addRow("CC列（任意）", self.cc_column)
-        form.addRow("固定BCC", self.bcc)
+        form.addRow("固定CC", fixed_cc_row)
+        form.addRow("固定BCC", bcc_row)
         form.addRow("差出人", self.sender)
         editor_layout.addWidget(destination)
         self.refresh_sender_options()
@@ -442,12 +537,12 @@ class ComposeTab(QWidget):
         self.tag_list.itemDoubleClicked.connect(
             lambda item: self.body.insertPlainText(item.text()))
         tags_layout.addWidget(self.tag_list)
-        conditional_help = QLabel(
-            "空欄時に敬称も消す場合:  {氏名2| 様}  "
-            "（値があると「佐藤 様」、空欄なら何も表示しません）"
-        )
-        conditional_help.setStyleSheet("color: #475569; font-weight: normal;")
-        tags_layout.addWidget(conditional_help)
+        conditional_button = QPushButton("条件付きタグを挿入（前後に文字を付ける）")
+        conditional_button.setToolTip(
+            "データが空欄の行では、タグも前後に付けた文字も表示されません。\n"
+            "例：「タグA」様、{、|タグB|様} → タグBが空欄なら「タグA様」だけになります")
+        conditional_button.clicked.connect(self.insert_conditional_tag)
+        tags_layout.addWidget(conditional_button)
         editor_layout.addWidget(tags)
 
         attach = QGroupBox("5. 共通添付")
@@ -486,7 +581,7 @@ class ComposeTab(QWidget):
         editor_scroll.setWidget(editor)
         editor_scroll.setMinimumWidth(480)
         splitter.addWidget(editor_scroll)
-        splitter.setSizes([760, 520])
+        splitter.setSizes([620, 660])
         root.addWidget(splitter, 1)
 
         self.send_status = QLabel()
@@ -543,6 +638,23 @@ class ComposeTab(QWidget):
         index = self.signature_combo.findText(current)
         self.signature_combo.setCurrentIndex(index if index >= 0 else 0)
 
+    def pick_contacts(self, target: QLineEdit):
+        contacts = self.storage.cc_contacts()
+        if not contacts:
+            QMessageBox.information(
+                self, "連絡先から追加",
+                "登録された連絡先がありません。「連絡先」タブから登録してください。")
+            return
+        dialog = ContactPickerDialog(self, contacts)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        emails = dialog.selected_emails()
+        if not emails:
+            return
+        existing = split_addresses(target.text())
+        merged = existing + [email for email in emails if email not in existing]
+        target.setText("; ".join(merged))
+
     def refresh_sender_options(self):
         """設定済みアカウントから、この送信で選べる差出人を更新する。"""
         current_mode = self.sender.currentData()
@@ -583,6 +695,25 @@ class ComposeTab(QWidget):
         if result.warnings:
             QMessageBox.warning(self, "読込時の注意", "\n".join(result.warnings))
 
+    def export_recipient_data(self):
+        if not self.rows:
+            QMessageBox.warning(self, "Excel出力", "先にExcelまたはCSVを読み込んでください。")
+            return
+        base_name = Path(self.source_path).stem if self.source_path else "名簿"
+        default_name = f"{base_name}_{date.today().strftime('%Y%m%d')}.xlsx"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Excelとして出力", default_name, "Excel ファイル (*.xlsx)")
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        try:
+            export_recipient_file(path, self.headers, self.rows)
+        except Exception as exc:
+            QMessageBox.critical(self, "出力エラー", str(exc))
+            return
+        QMessageBox.information(self, "Excel出力", f"「{Path(path).name}」に出力しました。")
+
     def apply_recipient_data(self, source_path: str, headers: list[str],
                              rows: list[dict[str, str]], display_name: str = ""):
         self.source_path, self.headers, self.rows = source_path, headers, rows
@@ -591,14 +722,13 @@ class ComposeTab(QWidget):
         self.clear_individual_attachments()
         self.filtered_indices = list(range(len(rows)))
         self.filter_indices = list(range(len(rows)))
+        self.included_rows = set(range(len(rows)))
+        self.active_filter_desc = ""
         source_name = display_name or Path(source_path).name
         self.recipient_display_name = source_name
         self.file_label.setText(f"{source_name}（{len(self.rows)}件）")
         self.to_column.clear()
         self.to_column.addItems(self.headers)
-        self.cc_column.clear()
-        self.cc_column.addItem("")
-        self.cc_column.addItems(self.headers)
         self.filter_column.clear()
         self.filter_column.addItems(self.headers)
         self.filter_value.clear()
@@ -674,14 +804,29 @@ class ComposeTab(QWidget):
         self.storage.delete_recipient_list(item["id"])
         QMessageBox.information(self, "名簿削除", f"名簿「{item['name']}」を削除しました。")
 
+    def on_status_header_clicked(self, section: int):
+        if section != 0 or not self.rows:
+            return
+        all_included = len(self.included_rows) == len(self.rows)
+        self.included_rows = set() if all_included else set(range(len(self.rows)))
+        self.refresh_validation()
+
     def render_table(self):
         self._updating_table = True
         self.table.setColumnCount(len(self.headers) + 1)
-        self.table.setHorizontalHeaderLabels(["状態"] + self.headers)
+        self.table.setHorizontalHeaderLabels(["状態（送信対象）"] + self.headers)
+        self.table.horizontalHeaderItem(0).setToolTip(
+            "チェックを外した行は送信対象から除外されます。\n"
+            "見出しをクリックすると全行のチェックを一括切替できます。")
         self.table.setRowCount(len(self.rows))
         for r, row in enumerate(self.rows):
             status_item = QTableWidgetItem("")
-            status_item.setFlags(status_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            status_item.setFlags(
+                (status_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                | Qt.ItemFlag.ItemIsUserCheckable)
+            status_item.setCheckState(
+                Qt.CheckState.Checked if r in self.included_rows
+                else Qt.CheckState.Unchecked)
             self.table.setItem(r, 0, status_item)
             for c, header in enumerate(self.headers, 1):
                 self.table.setItem(r, c, QTableWidgetItem(row.get(header, "")))
@@ -692,15 +837,26 @@ class ComposeTab(QWidget):
             self.table.selectRow(0)
         self.refresh_validation()
 
+    def update_active_filter_label(self):
+        parts = []
+        if self.active_filter_desc:
+            parts.append(f"絞り込み中: {self.active_filter_desc}")
+        search_text = self.search_value.text().strip()
+        if search_text:
+            parts.append(f"検索中: 「{search_text}」")
+        self.active_filter_label.setText(" ／ ".join(parts))
+        self.active_filter_label.setVisible(bool(parts))
+
     def refresh_validation(self):
+        self.update_active_filter_label()
         if not self.rows or not self.to_column.currentText():
-            self.summary.setText(f"表示・送信対象 0件 / 全{len(self.rows)}件")
+            self.summary.setText(f"表示 0件 / 送信対象 0件 / 全{len(self.rows)}件")
             return
         indices = self.filtered_indices or []
         target_rows = [self.rows[index] for index in indices]
         subset_errors = validate_rows(
-            target_rows, self.to_column.currentText(), self.cc_column.currentText(),
-            [index + 2 for index in indices])
+            target_rows, self.to_column.currentText(),
+            row_numbers=[index + 2 for index in indices])
         errors = {indices[index]: value for index, value in subset_errors.items()}
         self.validation_errors = errors
         self._updating_table = True
@@ -708,6 +864,9 @@ class ComposeTab(QWidget):
             item = self.table.item(row_index, 0)
             if not item:
                 continue
+            included = row_index in self.included_rows
+            item.setCheckState(
+                Qt.CheckState.Checked if included else Qt.CheckState.Unchecked)
             if row_index in errors:
                 error_detail = "\n".join(errors[row_index])
                 approved = (
@@ -715,24 +874,24 @@ class ComposeTab(QWidget):
                     == tuple(errors[row_index])
                 )
                 item.setText("確認済み" if approved else "エラー")
-                for column in range(self.table.columnCount()):
-                    cell = self.table.item(row_index, column)
-                    cell.setToolTip(
-                        ("確認済み（送信対象）\n" if approved else "")
-                        + error_detail)
-                    cell.setBackground(
-                        QColor("#fef3c7") if approved else QColor("#fee2e2"))
-                    cell.setForeground(QColor("#1f2937"))
+                tooltip = ("確認済み（送信対象）\n" if approved else "") + error_detail
+                base_color = "#fef3c7" if approved else "#fee2e2"
             else:
                 item.setText("OK")
-                for column in range(self.table.columnCount()):
-                    cell = self.table.item(row_index, column)
-                    cell.setToolTip("")
-                    cell.setBackground(QColor("white"))
-                    cell.setForeground(QColor("#1f2937"))
+                tooltip = ""
+                base_color = "white"
+            if not included:
+                tooltip = "送信対象外（チェックがオフ）\n" + tooltip if tooltip else "送信対象外（チェックがオフ）"
+                base_color = "#e2e8f0"
+            for column in range(self.table.columnCount()):
+                cell = self.table.item(row_index, column)
+                cell.setToolTip(tooltip)
+                cell.setBackground(QColor(base_color))
+                cell.setForeground(QColor("#1f2937"))
         self._updating_table = False
+        target_count = sum(1 for i in indices if i in self.included_rows)
         self.summary.setText(
-            f"表示・送信対象 {len(indices)}件 / 全{len(self.rows)}件"
+            f"表示 {len(indices)}件 / 送信対象 {target_count}件 / 全{len(self.rows)}件"
             f"（未確認エラー "
             f"{sum(self.approved_validation_issues.get(i) != tuple(v) for i, v in errors.items())}件"
             f" / 確認済み "
@@ -777,7 +936,17 @@ class ComposeTab(QWidget):
             self.refresh_validation()
 
     def on_table_item_changed(self, item: QTableWidgetItem):
-        if self._updating_table or item.column() == 0:
+        if self._updating_table:
+            return
+        if item.column() == 0:
+            row_index = item.row()
+            if row_index >= len(self.rows):
+                return
+            if item.checkState() == Qt.CheckState.Checked:
+                self.included_rows.add(row_index)
+            else:
+                self.included_rows.discard(row_index)
+            self.refresh_validation()
             return
         row_index = item.row()
         column_index = item.column() - 1
@@ -811,6 +980,10 @@ class ComposeTab(QWidget):
         self.validation_errors.clear()
         self.filter_indices = list(range(len(self.rows)))
         self.filtered_indices = list(range(len(self.rows)))
+        self.included_rows = {
+            i if i < row_index else i - 1
+            for i in self.included_rows if i != row_index
+        }
         self.file_label.setText(
             f"{self.recipient_display_name}（{len(self.rows)}件）")
         self.clear_individual_attachments()
@@ -830,6 +1003,7 @@ class ComposeTab(QWidget):
         if operator in ("含む", "完全一致") and not needle:
             if silent:
                 self.filter_indices = list(range(len(self.rows)))
+                self.active_filter_desc = ""
                 self.update_visible_rows()
                 return
             QMessageBox.information(self, "絞り込み", "絞り込む文字を入力してください。")
@@ -847,12 +1021,21 @@ class ComposeTab(QWidget):
             if include:
                 matched.append(index)
         self.filter_indices = matched
+        if operator in ("含む", "完全一致"):
+            self.active_filter_desc = f"「{column}」が「{self.filter_value.text().strip()}」を{operator}"
+        else:
+            self.active_filter_desc = f"「{column}」が{operator}"
         self.update_visible_rows()
 
     def clear_filter(self):
         self.filter_indices = list(range(len(self.rows)))
+        self.active_filter_desc = ""
         self.filter_value.clear()
         self.update_visible_rows()
+
+    def on_filter_value_changed(self, text: str):
+        if not text.strip() and self.filter_indices != list(range(len(self.rows))):
+            self.clear_filter()
 
     def update_visible_rows(self, _text: str = ""):
         needle = self.search_value.text().strip().casefold()
@@ -877,6 +1060,15 @@ class ComposeTab(QWidget):
         if data:
             self.subject.setText(data["subject"])
             self.body.setPlainText(data["body"])
+
+    def insert_conditional_tag(self):
+        if not self.headers:
+            QMessageBox.information(
+                self, "条件付きタグ", "先にExcelまたはCSVを読み込んでください。")
+            return
+        dialog = ConditionalTagDialog(self, self.headers)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.body.insertPlainText(dialog.tag_text())
 
     def save_template(self):
         if not self.subject.text().strip() and not self.body.toPlainText().strip():
@@ -1034,10 +1226,11 @@ class ComposeTab(QWidget):
         signature = self.signature_combo.currentData() or ""
         if signature:
             body = body.rstrip() + "\n\n" + render_template(signature, row)
+        cc_value = "" if test_to else self.fixed_cc.text().strip()
         return {
             "row_number": index + 2,
             "to_value": to_value,
-            "cc_value": "" if test_to else row.get(self.cc_column.currentText(), ""),
+            "cc_value": cc_value,
             "bcc_value": "" if test_to else self.bcc.text().strip(),
             "subject": render_template(self.subject.text(), row),
             "body": body,
@@ -1068,9 +1261,8 @@ class ComposeTab(QWidget):
         誤送信・不達になっても送信側にエラーが返らない。
         """
         addresses = []
-        for column in (self.to_column.currentText(), self.cc_column.currentText()):
-            if not column:
-                continue
+        column = self.to_column.currentText()
+        if column:
             for row in target_rows:
                 addresses.extend(split_addresses(row.get(column, "")))
         suspects = typo_domain_suspects(addresses)
@@ -1116,14 +1308,16 @@ class ComposeTab(QWidget):
         if not self.rows:
             QMessageBox.warning(self, "確認", "宛先データを読み込んでください。")
             return None
-        target_indices = list(self.filtered_indices)
+        target_indices = [
+            index for index in self.filtered_indices if index in self.included_rows
+        ]
         if not target_indices:
-            QMessageBox.warning(self, "確認", "絞り込み後の送信対象が0件です。")
+            QMessageBox.warning(self, "確認", "送信対象が0件です。チェックボックスをご確認ください。")
             return None
         target_rows = [self.rows[index] for index in target_indices]
         errors = validate_rows(
-            target_rows, self.to_column.currentText(), self.cc_column.currentText(),
-            [index + 2 for index in target_indices])
+            target_rows, self.to_column.currentText(),
+            row_numbers=[index + 2 for index in target_indices])
         unapproved_errors = {
             target_indices[index]: issues
             for index, issues in errors.items()
@@ -1145,6 +1339,10 @@ class ComposeTab(QWidget):
                 f"{preview}{more}\n\n"
                 "データプレビューで行を選び、"
                 "「選択行のエラーを確認・有効化」から確認してください。")
+            return None
+        bad_cc = [x for x in split_addresses(self.fixed_cc.text()) if not is_valid_email(x)]
+        if bad_cc:
+            QMessageBox.warning(self, "確認", "固定CCの形式が不正です。")
             return None
         bad_bcc = [x for x in split_addresses(self.bcc.text()) if not is_valid_email(x)]
         if bad_bcc:
@@ -1425,40 +1623,122 @@ class TemplateTab(QWidget):
     def __init__(self, storage: Storage):
         super().__init__()
         self.storage = storage
-        layout = QVBoxLayout(self)
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["テンプレート名", "件名", "更新日時"])
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        buttons = QHBoxLayout()
-        delete = QPushButton("選択したテンプレートを削除")
-        delete.clicked.connect(self.delete)
-        buttons.addStretch()
-        buttons.addWidget(delete)
-        layout.addWidget(QLabel("作成・送信画面で保存したテンプレートを管理します。"))
-        layout.addWidget(self.table)
-        layout.addLayout(buttons)
+        self.current_id: int | None = None
+        root = QHBoxLayout(self)
+
+        left = QVBoxLayout()
+        self.list = QListWidget()
+        self.list.currentRowChanged.connect(self.load_selected)
+        new_button = QPushButton("新しいテンプレート")
+        new_button.clicked.connect(self.new_template)
+        delete_button = QPushButton("選択したテンプレートを削除")
+        delete_button.clicked.connect(self.delete)
+        left.addWidget(QLabel("登録済みテンプレート"))
+        left.addWidget(self.list)
+        left.addWidget(new_button)
+        left.addWidget(delete_button)
+
+        editor_box = QGroupBox("テンプレートの登録・編集")
+        editor_box.setFixedWidth(420)
+        editor = QVBoxLayout(editor_box)
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("例：セミナー案内")
+        self.subject = QLineEdit()
+        self.subject.setPlaceholderText("件名にも {列名} を使用できます")
+        self.body = QPlainTextEdit()
+        self.body.setPlaceholderText("本文を入力してください。例：{参加者名} 様")
+        save = QPushButton("テンプレートを保存")
+        save.setObjectName("primary")
+        save.clicked.connect(self.save)
+        editor.addWidget(QLabel("テンプレート名"))
+        editor.addWidget(self.name)
+        editor.addWidget(QLabel("件名"))
+        editor.addWidget(self.subject)
+        editor.addWidget(QLabel("本文"))
+        editor.addWidget(self.body, 1)
+        editor.addWidget(save)
+
+        left_widget = QWidget()
+        left_widget.setLayout(left)
+        left_widget.setMaximumWidth(330)
+        root.addWidget(left_widget)
+        root.addWidget(editor_box)
+        root.addStretch(1)
+        self.refresh()
 
     def refresh(self):
-        templates = self.storage.templates()
-        self.table.setRowCount(len(templates))
-        for r, template in enumerate(templates):
-            item = QTableWidgetItem(template["name"])
-            item.setData(256, template["id"])
-            self.table.setItem(r, 0, item)
-            self.table.setItem(r, 1, QTableWidgetItem(template["subject"]))
-            self.table.setItem(r, 2, QTableWidgetItem(template["updated_at"]))
+        selected_id = self.current_id
+        self.list.clear()
+        for template in self.storage.templates():
+            self.list.addItem(
+                f"{template['name']}（{template['updated_at'].replace('T', ' ')}）")
+            self.list.item(self.list.count() - 1).setData(256, template)
+        if selected_id:
+            for index in range(self.list.count()):
+                if self.list.item(index).data(256)["id"] == selected_id:
+                    self.list.setCurrentRow(index)
+                    break
 
-    def delete(self):
-        row = self.table.currentRow()
+    def load_selected(self, row: int):
         if row < 0:
             return
-        if QMessageBox.question(self, "削除確認", "選択したテンプレートを削除しますか？",
-                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
-            self.storage.delete_template(self.table.item(row, 0).data(256))
-            self.refresh()
-            self.changed.emit()
+        template = self.list.item(row).data(256)
+        self.current_id = template["id"]
+        self.name.setText(template["name"])
+        self.subject.setText(template["subject"])
+        self.body.setPlainText(template["body"])
+
+    def new_template(self):
+        self.current_id = None
+        self.list.clearSelection()
+        self.name.clear()
+        self.subject.clear()
+        self.body.clear()
+        self.name.setFocus()
+
+    def save(self):
+        name = self.name.text().strip()
+        subject = self.subject.text()
+        body = self.body.toPlainText()
+        if not name or (not subject.strip() and not body.strip()):
+            QMessageBox.warning(
+                self, "テンプレート登録", "テンプレート名と、件名または本文を入力してください。")
+            return
+        existing = next(
+            (item for item in self.storage.templates()
+             if item["name"] == name and item["id"] != self.current_id),
+            None)
+        if existing and QMessageBox.question(
+                self, "上書き確認", f"テンプレート「{name}」を更新しますか？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        if existing and self.current_id and existing["id"] != self.current_id:
+            self.storage.delete_template(self.current_id)
+            self.current_id = existing["id"]
+        self.storage.save_template(name, subject, body, self.current_id)
+        self.current_id = next(
+            item["id"] for item in self.storage.templates()
+            if item["name"] == name)
+        self.refresh()
+        self.changed.emit()
+        QMessageBox.information(self, "テンプレート登録", f"テンプレート「{name}」を保存しました。")
+
+    def delete(self):
+        row = self.list.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "テンプレート削除", "削除するテンプレートを選択してください。")
+            return
+        template = self.list.item(row).data(256)
+        if QMessageBox.question(
+                self, "削除確認", f"テンプレート「{template['name']}」を削除しますか？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self.storage.delete_template(template["id"])
+        self.new_template()
+        self.refresh()
+        self.changed.emit()
 
 
 class HistoryTab(QWidget):
@@ -1577,6 +1857,7 @@ class SignatureTab(QWidget):
         left.addWidget(delete_button)
 
         editor_box = QGroupBox("署名の登録・編集")
+        editor_box.setFixedWidth(420)
         editor = QVBoxLayout(editor_box)
         self.name = QLineEdit()
         self.name.setPlaceholderText("例：総務部 山田")
@@ -1599,7 +1880,8 @@ class SignatureTab(QWidget):
         left_widget.setLayout(left)
         left_widget.setMaximumWidth(330)
         root.addWidget(left_widget)
-        root.addWidget(editor_box, 1)
+        root.addWidget(editor_box)
+        root.addStretch(1)
         self.refresh()
 
     def refresh(self):
@@ -1671,6 +1953,187 @@ class SignatureTab(QWidget):
         self.new_signature()
         self.refresh()
         self.changed.emit()
+
+
+class CCContactsTab(QWidget):
+    changed = pyqtSignal()
+
+    def __init__(self, storage: Storage):
+        super().__init__()
+        self.storage = storage
+        self.current_id: int | None = None
+        root = QHBoxLayout(self)
+
+        left = QVBoxLayout()
+        self.list = QListWidget()
+        self.list.currentRowChanged.connect(self.load_selected)
+        new_button = QPushButton("新しい連絡先")
+        new_button.clicked.connect(self.new_contact)
+        delete_button = QPushButton("選択した連絡先を削除")
+        delete_button.clicked.connect(self.delete_contact)
+        import_button = QPushButton("Excelからインポート")
+        import_button.clicked.connect(self.import_contacts)
+        left.addWidget(QLabel("よく使うCC/BCC先"))
+        left.addWidget(self.list)
+        left.addWidget(new_button)
+        left.addWidget(delete_button)
+        left.addWidget(import_button)
+
+        editor_box = QGroupBox("連絡先の登録・編集")
+        editor_box.setFixedWidth(420)
+        editor = QVBoxLayout(editor_box)
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("例：総務部 山田部長")
+        self.email = QLineEdit()
+        self.email.setPlaceholderText("例：yamada@example.jp")
+        save = QPushButton("連絡先を保存")
+        save.setObjectName("primary")
+        save.clicked.connect(self.save_contact)
+        editor.addWidget(QLabel("名前"))
+        editor.addWidget(self.name)
+        editor.addWidget(QLabel("メールアドレス"))
+        editor.addWidget(self.email)
+        editor.addWidget(QLabel(
+            "ここに登録した連絡先は、作成・送信画面のCC・BCC欄で"
+            "「連絡先から追加」から選んで使えます。"))
+        editor.addWidget(save)
+        editor.addStretch(1)
+
+        left_widget = QWidget()
+        left_widget.setLayout(left)
+        left_widget.setMaximumWidth(330)
+        root.addWidget(left_widget)
+        root.addWidget(editor_box)
+        root.addStretch(1)
+        self.refresh()
+
+    def refresh(self):
+        selected_id = self.current_id
+        self.list.clear()
+        for contact in self.storage.cc_contacts():
+            self.list.addItem(f"{contact['name']}（{contact['email']}）")
+            self.list.item(self.list.count() - 1).setData(256, contact)
+        if selected_id:
+            for index in range(self.list.count()):
+                if self.list.item(index).data(256)["id"] == selected_id:
+                    self.list.setCurrentRow(index)
+                    break
+
+    def load_selected(self, row: int):
+        if row < 0:
+            return
+        contact = self.list.item(row).data(256)
+        self.current_id = contact["id"]
+        self.name.setText(contact["name"])
+        self.email.setText(contact["email"])
+
+    def new_contact(self):
+        self.current_id = None
+        self.list.clearSelection()
+        self.name.clear()
+        self.email.clear()
+        self.name.setFocus()
+
+    def save_contact(self):
+        name = self.name.text().strip()
+        email = self.email.text().strip()
+        if not name or not email:
+            QMessageBox.warning(
+                self, "連絡先登録", "名前とメールアドレスを入力してください。")
+            return
+        if not is_valid_email(email):
+            QMessageBox.warning(self, "連絡先登録", "メールアドレスの形式が不正です。")
+            return
+        existing = next(
+            (item for item in self.storage.cc_contacts()
+             if item["name"] == name and item["id"] != self.current_id),
+            None)
+        if existing and QMessageBox.question(
+                self, "上書き確認", f"連絡先「{name}」を更新しますか？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        if existing and self.current_id and existing["id"] != self.current_id:
+            self.storage.delete_cc_contact(self.current_id)
+            self.current_id = existing["id"]
+        self.storage.save_cc_contact(name, email, self.current_id)
+        self.current_id = next(
+            item["id"] for item in self.storage.cc_contacts()
+            if item["name"] == name)
+        self.refresh()
+        self.changed.emit()
+        QMessageBox.information(self, "連絡先登録", f"連絡先「{name}」を保存しました。")
+
+    def delete_contact(self):
+        row = self.list.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "連絡先削除", "削除する連絡先を選択してください。")
+            return
+        contact = self.list.item(row).data(256)
+        if QMessageBox.question(
+                self, "連絡先削除の確認", f"連絡先「{contact['name']}」を削除しますか？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self.storage.delete_cc_contact(contact["id"])
+        self.new_contact()
+        self.refresh()
+        self.changed.emit()
+
+    def import_contacts(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "連絡先データを選択", "", "宛先データ (*.xlsx *.xls *.csv)")
+        if not path:
+            return
+        try:
+            result = load_recipient_file(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "読込エラー", str(exc))
+            return
+        if not result.headers or not result.rows:
+            QMessageBox.warning(self, "連絡先インポート", "読み込めるデータがありません。")
+            return
+        name_column, ok = QInputDialog.getItem(
+            self, "列の選択", "名前として使う列:", result.headers, 0, False)
+        if not ok:
+            return
+        email_column, ok = QInputDialog.getItem(
+            self, "列の選択", "メールアドレスとして使う列:", result.headers, 0, False)
+        if not ok:
+            return
+        entries = []
+        invalid_count = 0
+        for row in result.rows:
+            name = row.get(name_column, "").strip()
+            email = row.get(email_column, "").strip()
+            if not name or not is_valid_email(email):
+                invalid_count += 1
+                continue
+            entries.append((name, email))
+        if not entries:
+            QMessageBox.warning(self, "連絡先インポート", "登録できる行がありませんでした。")
+            return
+        existing_names = {contact["name"] for contact in self.storage.cc_contacts()}
+        duplicate_names = sorted({name for name, _ in entries if name in existing_names})
+        if duplicate_names:
+            preview = "、".join(duplicate_names[:10])
+            more = f"\nほか {len(duplicate_names) - 10}件" if len(duplicate_names) > 10 else ""
+            answer = QMessageBox.question(
+                self, "重複の確認",
+                f"{len(duplicate_names)}件は既存の連絡先と同じ名前です。\n\n"
+                f"{preview}{more}\n\n上書きしてよろしいですか？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        for name, email in entries:
+            self.storage.save_cc_contact(name, email)
+        self.refresh()
+        self.changed.emit()
+        message = f"{len(entries)}件を登録しました。"
+        if invalid_count:
+            message += f"\n（{invalid_count}件は名前またはメールアドレスが不正のためスキップしました）"
+        QMessageBox.information(self, "連絡先インポート", message)
 
 
 class SettingsTab(QWidget):
@@ -1849,7 +2312,7 @@ class MainWindow(QMainWindow):
             min(1400, int(screen.width() * 0.95)),
             min(900, int(screen.height() * 0.90)),
         )
-        self.setMinimumSize(960, 620)
+        self.setMinimumSize(1250, 680)
         QApplication.instance().setStyleSheet(APP_STYLE)
         self.storage = Storage()
         retention_days = int(self.storage.settings().get("retention_days", 365))
@@ -1859,10 +2322,12 @@ class MainWindow(QMainWindow):
         self.templates = TemplateTab(self.storage)
         self.history = HistoryTab(self.storage)
         self.signatures = SignatureTab(self.storage)
+        self.cc_contacts = CCContactsTab(self.storage)
         self.settings = SettingsTab(self.storage)
         self.tabs.addTab(self.compose, "作成・送信")
         self.tabs.addTab(self.templates, "テンプレート")
         self.tabs.addTab(self.signatures, "署名")
+        self.tabs.addTab(self.cc_contacts, "連絡先")
         self.tabs.addTab(self.history, "送信履歴")
         self.tabs.addTab(self.settings, "設定")
         self.tabs.currentChanged.connect(self.refresh_current)
@@ -1889,6 +2354,8 @@ class MainWindow(QMainWindow):
             self.templates.refresh()
         elif self.tabs.widget(index) is self.signatures:
             self.signatures.refresh()
+        elif self.tabs.widget(index) is self.cc_contacts:
+            self.cc_contacts.refresh()
         elif self.tabs.widget(index) is self.history:
             self.history.refresh()
 
