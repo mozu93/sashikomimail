@@ -197,12 +197,17 @@ class Storage:
         with self.connect() as db:
             db.execute("DELETE FROM cc_contacts WHERE id=?", (contact_id,))
 
+    _PROTECTED_SETTINGS_KEYS = {
+        "from_address", "test_address", "account_username",
+        "gmail_address", "gmail_app_password", "gmail_test_address",
+    }
+
     def settings(self) -> dict:
         with self.connect() as db:
             rows = db.execute("SELECT key,value FROM settings").fetchall()
-        protected_keys = {"from_address", "test_address", "account_username"}
         return {
-            key: json.loads(unprotect_text(value) if key in protected_keys else value)
+            key: json.loads(
+                unprotect_text(value) if key in self._PROTECTED_SETTINGS_KEYS else value)
             for key, value in rows
         }
 
@@ -210,7 +215,7 @@ class Storage:
         with self.connect() as db:
             for key, value in values.items():
                 serialized = json.dumps(value, ensure_ascii=False)
-                if key in {"from_address", "test_address", "account_username"}:
+                if key in self._PROTECTED_SETTINGS_KEYS:
                     serialized = protect_text(serialized)
                 db.execute("""INSERT INTO settings(key,value) VALUES(?,?)
                     ON CONFLICT(key) DO UPDATE SET value=excluded.value""",

@@ -21,6 +21,7 @@ from app.core import (
     load_recipient_file, match_individual_attachments, render_template,
     split_addresses, typo_domain_suspects, unknown_tags, validate_rows,
 )
+from app.gmail_smtp import GMAIL_ATTACHMENT_LIMIT, open_gmail_connection, send_mail_gmail
 from app.graph import (
     ATTACHMENT_LIMIT, get_access_token, get_cached_accounts, send_mail, sign_out,
 )
@@ -126,8 +127,13 @@ class SendWorker(QThread):
 
     def run(self):
         success = error = consecutive = 0
+        provider = self.config.get("provider", "m365")
+        connection = None
         try:
-            token, _username = get_access_token(self.config)
+            if provider == "gmail":
+                connection = open_gmail_connection(self.config)
+            else:
+                token, _username = get_access_token(self.config)
             for index, message in enumerate(self.messages, 1):
                 if self.cancelled:
                     break
@@ -136,11 +142,14 @@ class SendWorker(QThread):
                 self.progress.emit(
                     index - 1, total, f"{index}/{total}件目を送信中　{detail}")
                 try:
-                    graph_message = {
+                    mail_message = {
                         key: value for key, value in message.items()
                         if key != "row_number"
                     }
-                    send_mail(self.config, token, **graph_message)
+                    if provider == "gmail":
+                        send_mail_gmail(self.config, connection, **mail_message)
+                    else:
+                        send_mail(self.config, token, **mail_message)
                     success += 1
                     consecutive = 0
                     result = "送信要求を受理"
@@ -169,6 +178,12 @@ class SendWorker(QThread):
                     message["subject"], "エラー", str(exc))
             self.failed.emit(str(exc))
             self.cancelled = True
+        finally:
+            if connection is not None:
+                try:
+                    connection.quit()
+                except Exception:
+                    pass
         self.completed.emit(success, error, self.cancelled)
 
 
@@ -489,8 +504,14 @@ class ComposeTab(QWidget):
         bcc_row = QHBoxLayout()
         bcc_row.addWidget(self.bcc, 1)
         bcc_row.addWidget(bcc_pick)
+        self.provider = NoWheelComboBox()
+        self.provider.addItem("Microsoft 365", "m365")
+        self.provider.addItem("Gmail（SMTP）", "gmail")
+        self.provider.setToolTip("この送信で使用する送信元を選択します（設定タブで事前に接続設定が必要です）")
+        self.provider.currentIndexChanged.connect(self.on_provider_changed)
         self.sender = NoWheelComboBox()
         self.sender.setToolTip("この送信で使用する差出人を選択します")
+        form.addRow("送信元", self.provider)
         form.addRow("To列（必須）", self.to_column)
         form.addRow("固定CC", fixed_cc_row)
         form.addRow("固定BCC", bcc_row)
@@ -619,6 +640,7 @@ class ComposeTab(QWidget):
         ]
         self.refresh_templates()
         self.refresh_signatures()
+        self.refresh_attachment_display()
 
     def refresh_templates(self):
         current = self.template_combo.currentText()
@@ -655,6 +677,17 @@ class ComposeTab(QWidget):
         merged = existing + [email for email in emails if email not in existing]
         target.setText("; ".join(merged))
 
+    def current_attachment_limit(self) -> int:
+        return (
+            GMAIL_ATTACHMENT_LIMIT if self.provider.currentData() == "gmail"
+            else ATTACHMENT_LIMIT
+        )
+
+    def on_provider_changed(self):
+        is_gmail = self.provider.currentData() == "gmail"
+        self.sender.setEnabled(not is_gmail)
+        self.refresh_attachment_display()
+
     def refresh_sender_options(self):
         """設定済みアカウントから、この送信で選べる差出人を更新する。"""
         current_mode = self.sender.currentData()
@@ -673,6 +706,12 @@ class ComposeTab(QWidget):
 
     def selected_sender_config(self) -> tuple[dict, str]:
         settings = self.storage.settings()
+        if self.provider.currentData() == "gmail":
+            settings["provider"] = "gmail"
+            gmail_address = settings.get("gmail_address", "")
+            settings["from_address"] = gmail_address
+            return settings, gmail_address or "未設定"
+        settings["provider"] = "m365"
         account = settings.get("account_username", "") or "未確認"
         proxy = settings.get("from_address", "")
         if self.sender.currentData() == "proxy" and proxy:
@@ -1097,11 +1136,12 @@ class ComposeTab(QWidget):
 
     def add_attachments(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "添付ファイルを選択")
+        limit = self.current_attachment_limit()
         rejected = []
         for path in paths:
             if path not in self.attachments:
                 proposed_size = self.attachment_total_size() + Path(path).stat().st_size
-                if proposed_size > ATTACHMENT_LIMIT:
+                if proposed_size > limit:
                     rejected.append(Path(path).name)
                 else:
                     self.attachments.append(path)
@@ -1109,7 +1149,8 @@ class ComposeTab(QWidget):
         if rejected:
             QMessageBox.warning(
                 self, "添付容量の上限",
-                "安全上限の合計2.5MBを超えるため、次のファイルは追加しませんでした。\n\n"
+                f"安全上限の合計{limit / (1024 * 1024):.1f}MBを超えるため、"
+                "次のファイルは追加しませんでした。\n\n"
                 + "\n".join(rejected)
                 + "\n\n大きなファイルは圧縮するか、クラウド共有リンクを本文へ記載してください。"
             )
@@ -1126,17 +1167,19 @@ class ComposeTab(QWidget):
         )
 
     def refresh_attachment_display(self):
+        limit = self.current_attachment_limit()
         total = self.attachment_total_size()
         count = len(self.attachments)
         mb = total / (1024 * 1024)
-        remaining = max(ATTACHMENT_LIMIT - total, 0) / (1024 * 1024)
+        remaining = max(limit - total, 0) / (1024 * 1024)
         self.attach_label.setText(
             "、".join(Path(path).name for path in self.attachments) or "添付なし")
         self.attach_label.setToolTip("\n".join(
             f"{Path(path).name}  ({Path(path).stat().st_size / (1024 * 1024):.2f} MB)"
             for path in self.attachments if Path(path).is_file()
         ))
-        self.attach_usage.setValue(min(total, ATTACHMENT_LIMIT))
+        self.attach_usage.setRange(0, limit)
+        self.attach_usage.setValue(min(total, limit))
         self.attach_usage.setFormat(
             f"{count}点 / {mb:.2f} MB（残り {remaining:.2f} MB・点数上限なし）")
 
@@ -1366,17 +1409,19 @@ class ComposeTab(QWidget):
         if missing:
             QMessageBox.warning(self, "確認", "添付ファイルが見つかりません:\n" + "\n".join(missing))
             return None
+        limit = self.current_attachment_limit()
         oversized_rows = []
         for index in target_indices:
             paths = self.attachments + self.individual_attachments.get(index, [])
             size = sum(Path(path).stat().st_size for path in paths)
-            if size > ATTACHMENT_LIMIT:
+            if size > limit:
                 oversized_rows.append(
                     f"{index + 2}行目: {size / (1024 * 1024):.2f} MB")
         if oversized_rows:
             QMessageBox.warning(
                 self, "添付容量の上限",
-                "共通添付と個別添付の合計が安全上限の2.5MBを超える行があります。\n\n"
+                f"共通添付と個別添付の合計が安全上限の{limit / (1024 * 1024):.1f}MBを"
+                "超える行があります。\n\n"
                 + "\n".join(oversized_rows[:10]))
             return None
         if not self.confirm_delivery_risks(target_rows):
@@ -1419,8 +1464,11 @@ class ComposeTab(QWidget):
         messages = self.preflight()
         if not messages:
             return
-        settings = self.storage.settings()
-        address = settings.get("test_address", "")
+        settings, _from_address = self.selected_sender_config()
+        address = (
+            settings.get("gmail_test_address", "") if settings.get("provider") == "gmail"
+            else settings.get("test_address", "")
+        )
         if not is_valid_email(address):
             QMessageBox.warning(self, "テスト送信", "設定画面で正しいテスト送信先を登録してください。")
             return
@@ -1439,13 +1487,21 @@ class ComposeTab(QWidget):
         if not messages:
             return
         settings, from_address = self.selected_sender_config()
-        account = settings.get("account_username", "") or "未確認"
-        if account == "未確認":
-            QMessageBox.warning(
-                self, "送信アカウント未確認",
-                "設定タブで「サインイン／確認」を実行し、"
-                "送信アカウントを確認してから一括送信してください。")
-            return
+        if settings.get("provider") == "gmail":
+            if not settings.get("gmail_address") or not settings.get("gmail_app_password"):
+                QMessageBox.warning(
+                    self, "Gmail未設定",
+                    "設定タブでGmailアドレスとアプリパスワードを登録してから一括送信してください。")
+                return
+            account = settings.get("gmail_address")
+        else:
+            account = settings.get("account_username", "") or "未確認"
+            if account == "未確認":
+                QMessageBox.warning(
+                    self, "送信アカウント未確認",
+                    "設定タブで「サインイン／確認」を実行し、"
+                    "送信アカウントを確認してから一括送信してください。")
+                return
         if self.individual_match_columns:
             assigned_count = sum(
                 bool(self.individual_attachments.get(index))
@@ -1515,20 +1571,21 @@ class ComposeTab(QWidget):
                 "添付ファイルが見つからないため再送信できません。\n\n"
                 + "\n".join(sorted(set(missing))))
             return
+        limit = self.current_attachment_limit()
         oversized = []
         for message in messages:
             total = sum(
                 Path(path).stat().st_size
                 for path in message.get("attachment_paths", [])
             )
-            if total > ATTACHMENT_LIMIT:
+            if total > limit:
                 oversized.append(
                     f"{message.get('to_value', '')}: "
                     f"{total / (1024 * 1024):.2f} MB")
         if oversized:
             QMessageBox.warning(
                 self, "再送信",
-                "安全上限の2.5MBを超える添付があります。\n\n"
+                f"安全上限の{limit / (1024 * 1024):.1f}MBを超える添付があります。\n\n"
                 + "\n".join(oversized[:10]))
             return
         answer = QMessageBox.question(
@@ -2190,6 +2247,23 @@ class SettingsTab(QWidget):
             "Entra IDのアプリ登録で「モバイルとデスクトップ アプリ」を構成し、"
             "委任されたアクセス許可 Mail.Send を付与してください。"
         ))
+        gmail_box = QGroupBox("Gmail（SMTP）での送信")
+        gmail_form = QFormLayout(gmail_box)
+        self.gmail_address = QLineEdit()
+        self.gmail_app_password = QLineEdit()
+        self.gmail_app_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.gmail_test_address = QLineEdit()
+        gmail_form.addRow("Gmailアドレス", self.gmail_address)
+        gmail_form.addRow("アプリパスワード", self.gmail_app_password)
+        gmail_form.addRow("テスト送信先", self.gmail_test_address)
+        gmail_test_button = QPushButton("接続テスト")
+        gmail_test_button.clicked.connect(self.test_gmail_connection)
+        gmail_form.addRow("", gmail_test_button)
+        layout.addWidget(gmail_box)
+        layout.addWidget(QLabel(
+            "通常のログインパスワードではなく、Googleアカウントの2段階認証を有効にした上で\n"
+            "発行する「アプリパスワード」を入力してください。"
+        ))
         deliverability = QGroupBox("迷惑メール判定を減らすための管理者設定")
         deliverability_layout = QVBoxLayout(deliverability)
         deliverability_layout.addWidget(QLabel(
@@ -2216,6 +2290,22 @@ class SettingsTab(QWidget):
         self.refresh_accounts(settings.get("account_username", ""))
         self.interval.setValue(max(int(settings.get("interval_ms", 2000)), 2000))
         self.retention_days.setValue(int(settings.get("retention_days", 365)))
+        self.gmail_address.setText(settings.get("gmail_address", ""))
+        self.gmail_app_password.setText(settings.get("gmail_app_password", ""))
+        self.gmail_test_address.setText(settings.get("gmail_test_address", ""))
+
+    def test_gmail_connection(self):
+        config = {
+            "gmail_address": self.gmail_address.text().strip(),
+            "gmail_app_password": self.gmail_app_password.text(),
+        }
+        try:
+            connection = open_gmail_connection(config)
+            connection.quit()
+        except Exception as exc:
+            QMessageBox.critical(self, "Gmail接続テスト", str(exc))
+            return
+        QMessageBox.information(self, "Gmail接続テスト", "Gmailへの接続に成功しました。")
 
     def current_graph_config(self) -> dict:
         return {
@@ -2266,12 +2356,10 @@ class SettingsTab(QWidget):
         QMessageBox.information(self, "サインアウト", "認証情報を削除しました。")
 
     def save(self):
-        if not self.tenant.text().strip() or not self.client.text().strip():
-            QMessageBox.warning(
-                self, "入力エラー", "テナントIDとクライアントIDを入力してください。")
-            return
         for value, name in ((self.from_address.text(), "代理差出人"),
-                            (self.test_address.text(), "テスト送信先")):
+                            (self.test_address.text(), "テスト送信先"),
+                            (self.gmail_address.text(), "Gmailアドレス"),
+                            (self.gmail_test_address.text(), "テスト送信先（Gmail）")):
             if value.strip() and not is_valid_email(value):
                 QMessageBox.warning(self, "入力エラー", f"{name}の形式が不正です。")
                 return
@@ -2283,6 +2371,9 @@ class SettingsTab(QWidget):
             "account_username": self.account.currentText().strip(),
             "interval_ms": self.interval.value(),
             "retention_days": self.retention_days.value(),
+            "gmail_address": self.gmail_address.text().strip(),
+            "gmail_app_password": self.gmail_app_password.text(),
+            "gmail_test_address": self.gmail_test_address.text().strip(),
         })
         self.changed.emit()
         QMessageBox.information(self, "設定", "設定を保存しました。")
