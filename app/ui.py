@@ -504,20 +504,17 @@ class ComposeTab(QWidget):
         bcc_row = QHBoxLayout()
         bcc_row.addWidget(self.bcc, 1)
         bcc_row.addWidget(bcc_pick)
-        self.provider = NoWheelComboBox()
-        self.provider.addItem("Microsoft 365", "m365")
-        self.provider.addItem("Gmail（SMTP）", "gmail")
-        self.provider.setToolTip("この送信で使用する送信元を選択します（設定タブで事前に接続設定が必要です）")
-        self.provider.currentIndexChanged.connect(self.on_provider_changed)
         self.sender = NoWheelComboBox()
-        self.sender.setToolTip("この送信で使用する差出人を選択します")
-        form.addRow("送信元", self.provider)
+        self.sender.setToolTip(
+            "この送信で使用する差出人を選択します。\n"
+            "選んだ差出人に応じて送信方法（Microsoft 365 / Gmail）も切り替わります。\n"
+            "（設定タブで事前に接続設定が必要です）")
+        self.sender.currentIndexChanged.connect(self.on_sender_changed)
+        form.addRow("差出人", self.sender)
         form.addRow("To列（必須）", self.to_column)
         form.addRow("固定CC", fixed_cc_row)
         form.addRow("固定BCC", bcc_row)
-        form.addRow("差出人", self.sender)
         editor_layout.addWidget(destination)
-        self.refresh_sender_options()
 
         template = QGroupBox("4. 件名・本文")
         template_layout = QVBoxLayout(template)
@@ -640,7 +637,7 @@ class ComposeTab(QWidget):
         ]
         self.refresh_templates()
         self.refresh_signatures()
-        self.refresh_attachment_display()
+        self.refresh_sender_options()
 
     def refresh_templates(self):
         current = self.template_combo.currentText()
@@ -679,13 +676,12 @@ class ComposeTab(QWidget):
 
     def current_attachment_limit(self) -> int:
         return (
-            GMAIL_ATTACHMENT_LIMIT if self.provider.currentData() == "gmail"
+            GMAIL_ATTACHMENT_LIMIT if self.sender.currentData() == "gmail"
             else ATTACHMENT_LIMIT
         )
 
-    def on_provider_changed(self):
-        is_gmail = self.provider.currentData() == "gmail"
-        self.sender.setEnabled(not is_gmail)
+    def on_sender_changed(self):
+        # Gmailとの切り替えで添付の安全上限が変わるため、表示を作り直す。
         self.refresh_attachment_display()
 
     def refresh_sender_options(self):
@@ -694,6 +690,9 @@ class ComposeTab(QWidget):
         settings = self.storage.settings()
         account = settings.get("account_username", "")
         proxy = settings.get("from_address", "")
+        gmail_address = settings.get("gmail_address", "")
+        # 項目の入れ替え中に添付表示が何度も走らないよう、signalを止める。
+        self.sender.blockSignals(True)
         self.sender.clear()
         self.sender.addItem(
             f"自分のアドレス（{account}）" if account else "自分のアドレス",
@@ -701,12 +700,19 @@ class ComposeTab(QWidget):
         )
         if proxy:
             self.sender.addItem(f"代理差出人（{proxy}）", "proxy")
+        # 未設定でも項目は出す。設定タブへ誘導できるようにするため。
+        self.sender.addItem(
+            f"Gmail（{gmail_address}）" if gmail_address else "Gmail（未設定）",
+            "gmail",
+        )
         index = self.sender.findData(current_mode)
         self.sender.setCurrentIndex(index if index >= 0 else 0)
+        self.sender.blockSignals(False)
+        self.refresh_attachment_display()
 
     def selected_sender_config(self) -> tuple[dict, str]:
         settings = self.storage.settings()
-        if self.provider.currentData() == "gmail":
+        if self.sender.currentData() == "gmail":
             settings["provider"] = "gmail"
             gmail_address = settings.get("gmail_address", "")
             settings["from_address"] = gmail_address
@@ -1465,6 +1471,13 @@ class ComposeTab(QWidget):
         if not messages:
             return
         settings, _from_address = self.selected_sender_config()
+        if settings.get("provider") == "gmail" and not (
+                settings.get("gmail_address") and settings.get("gmail_app_password")):
+            QMessageBox.warning(
+                self, "Gmail未設定",
+                "設定タブでGmailアドレスとアプリパスワードを登録してから"
+                "テスト送信してください。")
+            return
         address = (
             settings.get("gmail_test_address", "") if settings.get("provider") == "gmail"
             else settings.get("test_address", "")

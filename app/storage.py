@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from app.security import protect_text, unprotect_text
+
+# 復号・JSON解析に失敗した設定値の目印。Noneを保存した設定と区別する。
+_UNREADABLE = object()
 
 
 def data_dir() -> Path:
@@ -202,13 +206,30 @@ class Storage:
         "gmail_address", "gmail_app_password", "gmail_test_address",
     }
 
+    @staticmethod
+    def _decode_setting(key: str, value: str):
+        """保存済みの設定値を1件復号する。読めない値は_UNREADABLEを返す。
+
+        復号は保護対象キーの一覧ではなく`dpapi:`の有無で判断する。保護対象
+        キーは版を追うごとに増えるため（例：Gmail関連キーはv1.3.0で追加）、
+        一覧に無いキーを平文とみなすと、暗号化済みの値をそのまま
+        `json.loads`へ渡して起動時に落ちる。
+        値が1件壊れていてもアプリごと起動不能にはせず、その設定だけを
+        未設定として扱う。
+        """
+        try:
+            return json.loads(unprotect_text(value))
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "設定 %s を読み込めなかったため未設定として扱います。", key)
+            return _UNREADABLE
+
     def settings(self) -> dict:
         with self.connect() as db:
             rows = db.execute("SELECT key,value FROM settings").fetchall()
+        decoded = {key: self._decode_setting(key, value) for key, value in rows}
         return {
-            key: json.loads(
-                unprotect_text(value) if key in self._PROTECTED_SETTINGS_KEYS else value)
-            for key, value in rows
+            key: value for key, value in decoded.items() if value is not _UNREADABLE
         }
 
     def save_settings(self, values: dict) -> None:

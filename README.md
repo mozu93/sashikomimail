@@ -2,12 +2,13 @@
 
 [![CI](https://github.com/mozu93/sashikomimail/actions/workflows/ci.yml/badge.svg)](https://github.com/mozu93/sashikomimail/actions/workflows/ci.yml)
 
-Windows / Microsoft 365対応の差し込みメール送信デスクトップアプリです。
+Windows / Microsoft 365・Gmail対応の差し込みメール送信デスクトップアプリです。
 
-最新バージョン：**1.2.0**
+最新バージョン：**1.3.0**
 
 Excel / CSV の任意列を差し込みタグとして使用し、Microsoft 365（Microsoft
-Graph API）から個別メールを一括送信する Windows デスクトップアプリです。
+Graph API）または Gmail（SMTP）から個別メールを一括送信する Windows
+デスクトップアプリです。
 
 ## セットアップ
 
@@ -28,12 +29,15 @@ python main.py
 1. 「作成・送信」で xlsx / xls / csv を読み込む
 2. 継続利用する場合は「現在の名簿を保存」でアプリ内へ保存する
 3. To列を選び、必要に応じて固定CC・固定BCCを設定する
-4. 「自分のアドレス」または設定済みの「代理差出人」を選ぶ
+4. 「差出人」で「自分のアドレス」「代理差出人」「Gmail」から選ぶ
 5. `{ヘッダー名}` を使って件名・本文を作る
 6. 行を選んでプレビューし、テスト送信する
 7. エラーがないこと、または内容を確認して有効化済みであることを確認して一括送信する
 
 差出人の選択は、テスト送信、一括送信、送信履歴からの再送に反映されます。
+「Gmail」を選ぶと、Microsoft 365ではなくGmailのSMTPで送信します（設定タブに
+Gmailアドレスとアプリパスワードの登録が必要です）。添付の安全上限は
+Microsoft 365が2.5MB、Gmailが25MBで、差出人の選択に合わせて切り替わります。
 代理差出人を利用する場合は、設定画面へのアドレス登録に加えて、Microsoft 365側の
 `Mail.Send.Shared`アクセス許可とメールボックスの送信権限が必要です。
 

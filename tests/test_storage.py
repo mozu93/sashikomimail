@@ -1,3 +1,6 @@
+import json
+
+from app.security import protect_text
 from app.storage import Storage
 
 
@@ -119,3 +122,30 @@ def test_sensitive_settings_are_encrypted_and_readable(tmp_path):
             "SELECT key,value FROM settings").fetchall())
     assert "secret@example.jp" not in raw["test_address"]
     assert storage.settings()["test_address"] == "secret@example.jp"
+
+
+def test_encrypted_setting_is_readable_even_if_key_list_lacks_it(tmp_path):
+    """保護対象キーの一覧に無くても、暗号化済みの値は復号して読める。
+
+    新しい版が暗号化して保存したキーを古い版が平文とみなし、起動時に
+    JSONDecodeErrorで落ちた不具合の回帰確認。
+    """
+    storage = Storage(str(tmp_path / "forward.db"))
+    protected = protect_text(json.dumps("user@gmail.com", ensure_ascii=False))
+    with storage.connect() as db:
+        db.execute(
+            "INSERT INTO settings(key,value) VALUES('future_key',?)", (protected,))
+    assert "future_key" not in Storage._PROTECTED_SETTINGS_KEYS
+    assert storage.settings()["future_key"] == "user@gmail.com"
+
+
+def test_unreadable_setting_is_skipped_instead_of_raising(tmp_path):
+    """壊れた設定値が1件あってもアプリを起動不能にしない。"""
+    storage = Storage(str(tmp_path / "broken.db"))
+    storage.save_settings({"tenant_id": "abc"})
+    with storage.connect() as db:
+        db.execute(
+            "INSERT INTO settings(key,value) VALUES('interval_ms','')")
+    settings = storage.settings()
+    assert settings["tenant_id"] == "abc"
+    assert "interval_ms" not in settings
