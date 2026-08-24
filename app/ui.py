@@ -2212,7 +2212,13 @@ class SettingsTab(QWidget):
     def __init__(self, storage: Storage):
         super().__init__()
         self.storage = storage
-        layout = QVBoxLayout(self)
+        # 設定項目は縦に長く、1366×768ではウィンドウ高さに収まらない。
+        # スクロール領域へ入れないと、レイアウトが最小高さ以下へ押し潰され、
+        # グループ内の行が重なって表示される。
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         box = QGroupBox("Microsoft 365 / Microsoft Graph API")
         form = QFormLayout(box)
         self.tenant = QLineEdit()
@@ -2289,9 +2295,14 @@ class SettingsTab(QWidget):
             "重複・不正アドレスを検査します。"
         ))
         layout.addWidget(deliverability)
-        layout.addWidget(save, alignment=__import__("PyQt6.QtCore", fromlist=["Qt"]).Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(backup, alignment=__import__("PyQt6.QtCore", fromlist=["Qt"]).Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(save, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(backup, alignment=Qt.AlignmentFlag.AlignLeft)
         layout.addStretch()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(content)
+        root.addWidget(scroll)
         self.load()
 
     def load(self):
