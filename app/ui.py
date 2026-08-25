@@ -19,7 +19,8 @@ from PyQt6.QtWidgets import (
 from app.core import (
     carrier_domain_counts, export_recipient_file, is_valid_email,
     load_recipient_file, match_individual_attachments, render_template,
-    split_addresses, typo_domain_suspects, unknown_tags, validate_rows,
+    normalize_search_text, split_addresses, typo_domain_suspects, unknown_tags,
+    validate_rows,
 )
 from app.gmail_smtp import GMAIL_ATTACHMENT_LIMIT, open_gmail_connection, send_mail_gmail
 from app.graph import (
@@ -142,9 +143,13 @@ class SendWorker(QThread):
                 self.progress.emit(
                     index - 1, total, f"{index}/{total}件目を送信中　{detail}")
                 try:
+                    # 履歴表示用の値（行番号・事業所名など）は送信関数の引数ではない。
+                    # 必要なメール項目だけを渡し、履歴用の項目が増えても送信を壊さない。
                     mail_message = {
-                        key: value for key, value in message.items()
-                        if key != "row_number"
+                        key: message[key] for key in (
+                            "to_value", "cc_value", "bcc_value", "subject", "body",
+                            "attachment_paths",
+                        )
                     }
                     if provider == "gmail":
                         send_mail_gmail(self.config, connection, **mail_message)
@@ -1894,7 +1899,18 @@ class HistoryTab(QWidget):
     def __init__(self, storage: Storage):
         super().__init__()
         self.storage = storage
+        self.all_jobs: list[tuple] = []
         layout = QVBoxLayout(self)
+        job_search_row = QHBoxLayout()
+        self.job_search_value = QLineEdit()
+        self.job_search_value.setPlaceholderText(
+            "送信履歴を検索（種別・日時・ファイル・件名・状態）")
+        self.job_search_value.setClearButtonEnabled(True)
+        self.job_search_value.textChanged.connect(self.refresh)
+        self.job_search_count = QLabel()
+        job_search_row.addWidget(QLabel("送信履歴を検索"))
+        job_search_row.addWidget(self.job_search_value, 1)
+        job_search_row.addWidget(self.job_search_count)
         self.jobs = QTableWidget(0, 8)
         self.jobs.setHorizontalHeaderLabels(
             ["種別", "日時", "ファイル", "件名", "総数", "受理", "エラー", "状態"])
@@ -1905,9 +1921,29 @@ class HistoryTab(QWidget):
             ["元データ行", "事業所名", "宛先", "件名", "結果", "エラー内容"])
         self.logs.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.logs.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        log_search_row = QHBoxLayout()
+        self.log_search_value = QLineEdit()
+        self.log_search_value.setPlaceholderText(
+            "選択中の明細を検索（事業所名・宛先・件名・結果・エラー内容）")
+        self.log_search_value.setClearButtonEnabled(True)
+        self.log_search_value.textChanged.connect(self.show_logs)
+        self.log_search_count = QLabel()
+        log_search_row.addWidget(QLabel("明細を検索"))
+        log_search_row.addWidget(self.log_search_value, 1)
+        log_search_row.addWidget(self.log_search_count)
+        jobs_pane = QWidget()
+        jobs_layout = QVBoxLayout(jobs_pane)
+        jobs_layout.setContentsMargins(0, 0, 0, 0)
+        jobs_layout.addLayout(job_search_row)
+        jobs_layout.addWidget(self.jobs)
+        logs_pane = QWidget()
+        logs_layout = QVBoxLayout(logs_pane)
+        logs_layout.setContentsMargins(0, 0, 0, 0)
+        logs_layout.addLayout(log_search_row)
+        logs_layout.addWidget(self.logs)
         splitter = QSplitter()
-        splitter.addWidget(self.jobs)
-        splitter.addWidget(self.logs)
+        splitter.addWidget(jobs_pane)
+        splitter.addWidget(logs_pane)
         splitter.setOrientation(__import__("PyQt6.QtCore", fromlist=["Qt"]).Qt.Orientation.Vertical)
         buttons = QHBoxLayout()
         delete = QPushButton("選択した履歴を削除")
@@ -1930,7 +1966,12 @@ class HistoryTab(QWidget):
         layout.addLayout(buttons)
 
     def refresh(self):
-        jobs = self.storage.jobs()
+        self.all_jobs = self.storage.jobs()
+        query = normalize_search_text(self.job_search_value.text().strip())
+        jobs = [job for job in self.all_jobs
+                if not query or query in normalize_search_text(self.job_text(job))]
+        self.job_search_count.setText(
+            f"{len(jobs)} / {len(self.all_jobs)} 件" if query else f"{len(jobs)} 件")
         self.jobs.setRowCount(len(jobs))
         for r, job in enumerate(jobs):
             type_label = {"test": "テスト", "retry": "再送", "bulk": "一括"}
@@ -1945,12 +1986,35 @@ class HistoryTab(QWidget):
                 self.jobs.setItem(r, c, item)
         self.jobs.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.logs.setRowCount(0)
+        if jobs:
+            self.jobs.selectRow(0)
+            self.show_logs()
+        else:
+            self.log_search_count.setText("0 件")
+
+    @staticmethod
+    def job_text(job: tuple) -> str:
+        type_label = {"test": "テスト", "retry": "再送", "bulk": "一括"}
+        return " ".join(str(value) for value in (
+            type_label.get(job[8], "一括"), job[1], job[2], job[3], job[4], job[5], job[6],
+            "中断" if job[7] else "完了",
+        ))
 
     def show_logs(self):
         row = self.jobs.currentRow()
-        if row < 0:
+        job_item = self.jobs.item(row, 0) if row >= 0 else None
+        if job_item is None:
+            self.logs.setRowCount(0)
+            self.log_search_count.setText("0 件")
             return
-        logs = self.storage.logs(self.jobs.item(row, 0).data(256))
+        logs = self.storage.logs(job_item.data(256))
+        all_logs = logs
+        query = normalize_search_text(self.log_search_value.text().strip())
+        if query:
+            logs = [log for log in logs if any(
+                query in normalize_search_text(value) for value in log)]
+        self.log_search_count.setText(
+            f"{len(logs)} / {len(all_logs)} 件" if query else f"{len(logs)} 件")
         self.logs.setRowCount(len(logs))
         for r, log in enumerate(logs):
             for c, value in enumerate(log):

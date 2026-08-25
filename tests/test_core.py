@@ -4,7 +4,7 @@ from openpyxl import Workbook, load_workbook
 
 from app.core import (
     carrier_domain_counts, export_recipient_file, load_recipient_file,
-    match_individual_attachments, render_template, split_addresses,
+    match_individual_attachments, normalize_search_text, render_template, split_addresses,
     typo_domain_suspects, unknown_tags, validate_rows,
 )
 
@@ -19,6 +19,11 @@ def test_load_xlsx_and_normalize(tmp_path: Path):
     result = load_recipient_file(str(path))
     assert result.headers == ["事業所名", "人数", "メール"]
     assert result.rows[0]["人数"] == "2"
+
+
+def test_normalize_search_text_ignores_kana_and_width_variants():
+    assert normalize_search_text("やまだ ﾀﾛｳ") == normalize_search_text("ヤマダ　タロウ")
+    assert normalize_search_text("ｻﾄｳ") == normalize_search_text("さとう")
 
 
 def test_export_recipient_file_writes_headers_and_rows(tmp_path: Path):

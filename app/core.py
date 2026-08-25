@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -273,3 +274,13 @@ def match_individual_attachments(
             result[index] = sorted(matches)
     unmatched = sorted(path for path in file_paths if path not in used)
     return result, unmatched
+
+
+# 検索時の表記ゆれをそろえる。NFKC で全角・半角を統一し、ふりがなとして
+# 入力されやすいひらがなはカタカナに寄せる。
+def normalize_search_text(value: object) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value)).casefold()
+    return "".join(
+        chr(ord(char) + 0x60) if "ぁ" <= char <= "ゖ" else char
+        for char in normalized
+    )
