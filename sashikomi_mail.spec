@@ -11,6 +11,7 @@ a = Analysis(
     datas=[
         ("assets/icon.ico", "assets"),
         ("assets/icon.png", "assets"),
+        ("docs/ユーザーマニュアル.md", "docs"),
     ],
     hiddenimports=hiddenimports,
     hookspath=[],
@@ -43,4 +44,3 @@ coll = COLLECT(
     upx=True,
     name="SashikomiMail",
 )
-

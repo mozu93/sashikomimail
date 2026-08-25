@@ -7,7 +7,7 @@ from datetime import date
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QDesktopServices, QIcon
+from PyQt6.QtGui import QAction, QColor, QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog, QFormLayout,
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
@@ -2546,6 +2546,10 @@ class MainWindow(QMainWindow):
         self.storage = Storage()
         retention_days = int(self.storage.settings().get("retention_days", 365))
         self.storage.delete_old_jobs(retention_days)
+        file_menu = self.menuBar().addMenu("ファイル")
+        user_manual_action = QAction("ユーザーマニュアルを開く", self)
+        user_manual_action.triggered.connect(self.open_user_manual)
+        file_menu.addAction(user_manual_action)
         self.tabs = QTabWidget()
         self.compose = ComposeTab(self.storage)
         self.templates = TemplateTab(self.storage)
@@ -2575,6 +2579,18 @@ class MainWindow(QMainWindow):
         central_layout.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
         self.statusBar().showMessage("ExcelまたはCSVを選択してください")
+
+    def open_user_manual(self):
+        """同梱したユーザーマニュアルをアプリ内で表示する。"""
+        manual_path = Path(__file__).resolve().parent.parent / "docs" / "ユーザーマニュアル.md"
+        try:
+            content = manual_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "ユーザーマニュアル",
+                f"ユーザーマニュアルを開けませんでした。\n{exc}")
+            return
+        PreviewDialog(self, "ユーザーマニュアル", content).exec()
 
     def refresh_current(self, index: int):
         if self.tabs.widget(index) is self.compose:
