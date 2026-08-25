@@ -293,19 +293,20 @@ class Storage:
 
     def logs(self, job_id: int) -> list[tuple]:
         with self.connect() as db:
-            targets = db.execute("""SELECT row_number,to_address,subject,status,error_message
+            targets = db.execute("""SELECT row_number,to_address,subject,payload_json,status,error_message
                 FROM send_targets WHERE job_id=? ORDER BY id""", (job_id,)).fetchall()
             if targets:
                 label = {"success": "成功", "error": "エラー", "pending": "未送信"}
                 return [
-                    (row[0], unprotect_text(row[1]), unprotect_text(row[2]),
-                     label.get(row[3], row[3]), unprotect_text(row[4]))
+                    (row[0], json.loads(unprotect_text(row[3])).get("organization_name", ""),
+                     unprotect_text(row[1]), unprotect_text(row[2]),
+                     label.get(row[4], row[4]), unprotect_text(row[5]))
                     for row in targets
                 ]
             rows = db.execute("""SELECT row_number,to_address,subject,status,error_message
                 FROM send_logs WHERE job_id=? ORDER BY id""", (job_id,)).fetchall()
         return [
-            (row[0], unprotect_text(row[1]), unprotect_text(row[2]), row[3],
+            (row[0], "", unprotect_text(row[1]), unprotect_text(row[2]), row[3],
              unprotect_text(row[4]))
             for row in rows
         ]
@@ -340,3 +341,10 @@ class Storage:
             json.loads(unprotect_text(row[0]))
             for row in rows
         ]
+
+    def target_message(self, job_id: int, row_number: int) -> dict | None:
+        """履歴明細の送信時点のメール内容を返す。旧履歴では取得できない。"""
+        with self.connect() as db:
+            row = db.execute("""SELECT payload_json FROM send_targets
+                WHERE job_id=? AND row_number=?""", (job_id, row_number)).fetchone()
+        return json.loads(unprotect_text(row[0])) if row else None

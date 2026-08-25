@@ -34,7 +34,7 @@ def test_test_send_job_is_persisted_with_type(tmp_path):
     storage.finish_job(job_id, 1, 0, False)
     job = storage.jobs()[0]
     assert job[8] == "test"
-    assert storage.logs(job_id)[0][3] == "成功"
+    assert storage.logs(job_id)[0][4] == "成功"
 
 
 def test_template_round_trip_update_by_id_and_delete(tmp_path):
@@ -84,7 +84,7 @@ def test_cc_contact_round_trip_update_delete_and_encrypted(tmp_path):
 def test_pending_and_failed_targets_can_be_retried(tmp_path):
     storage = Storage(str(tmp_path / "retry.db"))
     messages = [
-        {"row_number": 2, "to_value": "a@example.jp", "subject": "A",
+        {"row_number": 2, "organization_name": "青空事業所", "to_value": "a@example.jp", "subject": "A",
          "body": "本文", "cc_value": "", "bcc_value": "",
          "attachment_paths": []},
         {"row_number": 3, "to_value": "b@example.jp", "subject": "B",
@@ -95,7 +95,9 @@ def test_pending_and_failed_targets_can_be_retried(tmp_path):
         "名簿.xlsx", "案内", 2, messages=messages)
     storage.add_log(job_id, 2, "a@example.jp", "A", "エラー", "送信失敗")
     logs = storage.logs(job_id)
-    assert [row[3] for row in logs] == ["エラー", "未送信"]
+    assert [row[4] for row in logs] == ["エラー", "未送信"]
+    assert logs[0][1] == "青空事業所"
+    assert storage.target_message(job_id, 2) == messages[0]
     assert storage.retry_messages(job_id) == messages
 
 

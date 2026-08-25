@@ -6,8 +6,8 @@ import webbrowser
 from datetime import date
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon
+from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog, QFormLayout,
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
@@ -152,7 +152,9 @@ class SendWorker(QThread):
                         send_mail(self.config, token, **mail_message)
                     success += 1
                     consecutive = 0
-                    result = "送信要求を受理"
+                    result = (
+                        "Gmailへ送信完了" if provider == "gmail"
+                        else "送信要求を受理")
                     self.logged.emit(message["row_number"], message["to_value"],
                                      message["subject"], "成功", "")
                 except Exception as exc:
@@ -199,6 +201,55 @@ class PreviewDialog(QDialog):
         close = QPushButton("閉じる")
         close.clicked.connect(self.accept)
         layout.addWidget(close)
+
+
+class AttachmentContentsDialog(QDialog):
+    """送信予定の添付を既定アプリで開き、内容を確認する画面。"""
+
+    def __init__(self, parent, attachment_paths: list[str]):
+        super().__init__(parent)
+        self.setWindowTitle("添付内容を確認")
+        self.resize(640, 360)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "送信予定の添付ファイルです。選択して「開く」を押すと、"
+            "既定のアプリで内容を確認できます。"))
+        self.files = QListWidget()
+        for path in attachment_paths:
+            file_path = Path(path)
+            size = (
+                f"（{file_path.stat().st_size / (1024 * 1024):.2f} MB）"
+                if file_path.is_file() else "（見つかりません）")
+            item = QListWidgetItem(f"{file_path.name} {size}")
+            item.setToolTip(str(file_path))
+            item.setData(Qt.ItemDataRole.UserRole, str(file_path))
+            self.files.addItem(item)
+        self.files.itemDoubleClicked.connect(lambda _item: self.open_selected())
+        layout.addWidget(self.files, 1)
+        buttons = QHBoxLayout()
+        open_button = QPushButton("選択したファイルを開く")
+        open_button.setObjectName("primary")
+        open_button.clicked.connect(self.open_selected)
+        close = QPushButton("閉じる")
+        close.clicked.connect(self.accept)
+        buttons.addWidget(open_button)
+        buttons.addStretch()
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+
+    def open_selected(self):
+        item = self.files.currentItem()
+        if not item:
+            QMessageBox.information(self, "添付内容を確認", "開くファイルを選択してください。")
+            return
+        path = Path(item.data(Qt.ItemDataRole.UserRole))
+        if not path.is_file():
+            QMessageBox.warning(self, "添付内容を確認", f"ファイルが見つかりません。\n{path}")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            QMessageBox.warning(
+                self, "添付内容を確認",
+                "ファイルを開けませんでした。対応するアプリがインストールされているか確認してください。")
 
 
 class ConditionalTagDialog(QDialog):
@@ -617,6 +668,8 @@ class ComposeTab(QWidget):
         self.progress.setFormat("%v / %m件")
         preview = QPushButton("選択行をプレビュー")
         preview.clicked.connect(self.preview_selected)
+        attachment_preview = QPushButton("添付内容を確認")
+        attachment_preview.clicked.connect(self.preview_attachments_for_selected)
         self.test_button = QPushButton("テスト送信")
         self.test_button.clicked.connect(self.test_send)
         self.send_button = QPushButton("一括送信")
@@ -628,12 +681,13 @@ class ComposeTab(QWidget):
         self.cancel_button.hide()
         controls.addWidget(self.progress, 1)
         controls.addWidget(preview)
+        controls.addWidget(attachment_preview)
         controls.addWidget(self.test_button)
         controls.addWidget(self.send_button)
         controls.addWidget(self.cancel_button)
         root.addLayout(controls)
         self.send_lock_widgets = [
-            source, splitter, preview, self.test_button, self.send_button,
+            source, splitter, preview, attachment_preview, self.test_button, self.send_button,
         ]
         self.refresh_templates()
         self.refresh_signatures()
@@ -642,11 +696,11 @@ class ComposeTab(QWidget):
     def refresh_templates(self):
         current = self.template_combo.currentText()
         self.template_combo.clear()
+        self.template_combo.addItem("テンプレートなし", None)
         for template in self.storage.templates():
             self.template_combo.addItem(template["name"], template)
         index = self.template_combo.findText(current)
-        if index >= 0:
-            self.template_combo.setCurrentIndex(index)
+        self.template_combo.setCurrentIndex(index if index >= 0 else 0)
 
     def refresh_signatures(self):
         current = self.signature_combo.currentText()
@@ -1278,6 +1332,7 @@ class ComposeTab(QWidget):
         cc_value = "" if test_to else self.fixed_cc.text().strip()
         return {
             "row_number": index + 2,
+            "organization_name": row.get("事業所名", "").strip(),
             "to_value": to_value,
             "cc_value": cc_value,
             "bcc_value": "" if test_to else self.bcc.text().strip(),
@@ -1302,6 +1357,20 @@ class ComposeTab(QWidget):
             f"{message['body']}"
         )
         PreviewDialog(self, "送信プレビュー", content).exec()
+
+    def preview_attachments_for_selected(self):
+        """選択行に実際に付く共通・個別添付の内容確認を開く。"""
+        selected = self.current_row()
+        if not selected:
+            QMessageBox.information(
+                self, "添付内容を確認", "確認する宛先の行を選択してください。")
+            return
+        message = self.message_for(*selected)
+        if not message["attachment_paths"]:
+            QMessageBox.information(
+                self, "添付内容を確認", "この宛先に送る添付ファイルはありません。")
+            return
+        AttachmentContentsDialog(self, message["attachment_paths"]).exec()
 
     def confirm_delivery_risks(self, target_rows: list[dict[str, str]]) -> bool:
         """打ち間違いドメインと携帯キャリア宛を送信前に確認する。
@@ -1645,18 +1714,26 @@ class ComposeTab(QWidget):
         self.cancel_button.hide()
         self.sending_state_changed.emit(False)
         status = "中断" if cancelled else "完了"
+        provider = self.selected_sender_config()[0].get("provider", "m365")
+        if provider == "gmail":
+            result_label = "Gmailへの送信完了"
+            acceptance_note = (
+                "※「送信完了」はGmailのSMTPサーバーがメールを受け付けた状態です。")
+        else:
+            result_label = "送信要求の受理"
+            acceptance_note = "※「受理」はMicrosoft 365が送信要求を受け付けた状態です。"
         result = (
             f"{status}\n"
-            f"送信要求の受理: {success}件\n"
+            f"{result_label}: {success}件\n"
             f"エラー: {error}件\n\n"
-            "※「受理」はMicrosoft 365が送信要求を受け付けた状態です。\n"
+            f"{acceptance_note}\n"
             "　相手に届いたことを保証するものではありません。\n"
             "　受信側の迷惑メール判定や、携帯キャリアのなりすまし規制で\n"
             "　エラーが返らないまま破棄される場合があります。"
         )
         self.send_status.setText(
-            f"{status}　送信要求の受理: {success}件／エラー: {error}件"
-            "（受理は到達を保証しません）")
+            f"{status}　{result_label}: {success}件／エラー: {error}件"
+            "（送信完了・受理は到達を保証しません）")
         self.send_status.show()
         if self.send_errors:
             result += "\n\nエラー詳細:\n" + "\n\n".join(self.send_errors[:10])
@@ -1823,9 +1900,11 @@ class HistoryTab(QWidget):
             ["種別", "日時", "ファイル", "件名", "総数", "受理", "エラー", "状態"])
         self.jobs.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.jobs.itemSelectionChanged.connect(self.show_logs)
-        self.logs = QTableWidget(0, 5)
-        self.logs.setHorizontalHeaderLabels(["元データ行", "宛先", "件名", "結果", "エラー内容"])
-        self.logs.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.logs = QTableWidget(0, 6)
+        self.logs.setHorizontalHeaderLabels(
+            ["元データ行", "事業所名", "宛先", "件名", "結果", "エラー内容"])
+        self.logs.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.logs.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         splitter = QSplitter()
         splitter.addWidget(self.jobs)
         splitter.addWidget(self.logs)
@@ -1835,12 +1914,15 @@ class HistoryTab(QWidget):
         delete.clicked.connect(self.delete_selected)
         retry = QPushButton("エラー・未送信を再送")
         retry.clicked.connect(self.retry_selected)
+        preview = QPushButton("選択したメール内容を確認")
+        preview.clicked.connect(self.preview_selected_message)
         buttons.addStretch()
+        buttons.addWidget(preview)
         buttons.addWidget(retry)
         buttons.addWidget(delete)
         note = QLabel(
             "送信履歴（エラー宛先は内容を確認後、元データを修正して再送信できます）\n"
-            "「受理」はMicrosoft 365が送信要求を受け付けた件数です。"
+            "「受理」または「送信完了」は送信サービスがメールを受け付けた件数です。"
             "相手への到達を保証するものではありません。")
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -1857,6 +1939,7 @@ class HistoryTab(QWidget):
                       "中断" if job[7] else "完了"]
             for c, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
+                item.setToolTip(str(value))
                 if c == 0:
                     item.setData(256, job[0])
                 self.jobs.setItem(r, c, item)
@@ -1872,9 +1955,40 @@ class HistoryTab(QWidget):
         for r, log in enumerate(logs):
             for c, value in enumerate(log):
                 # 結果列の「成功」は受理の意味なので、表示だけ言い換える。
-                if c == 3 and value == "成功":
+                if c == 4 and value == "成功":
                     value = "受理"
-                self.logs.setItem(r, c, QTableWidgetItem(str(value)))
+                item = QTableWidgetItem(str(value))
+                item.setToolTip(str(value))
+                self.logs.setItem(r, c, item)
+        if logs:
+            self.logs.selectRow(0)
+
+    def preview_selected_message(self):
+        job_row = self.jobs.currentRow()
+        log_row = self.logs.currentRow()
+        if job_row < 0 or log_row < 0:
+            QMessageBox.information(
+                self, "メール内容の確認", "履歴とメール明細を選択してください。")
+            return
+        job_id = self.jobs.item(job_row, 0).data(256)
+        row_number = int(self.logs.item(log_row, 0).text())
+        message = self.storage.target_message(job_id, row_number)
+        if not message:
+            QMessageBox.information(
+                self, "メール内容の確認",
+                "この旧形式の履歴にはメール本文・添付情報が保存されていません。")
+            return
+        attachments = message.get("attachment_paths", [])
+        content = (
+            f"事業所名: {message.get('organization_name', '') or '（未設定）'}\n"
+            f"To: {message.get('to_value', '')}\n"
+            f"CC: {message.get('cc_value', '')}\n"
+            f"BCC: {message.get('bcc_value', '')}\n"
+            f"件名: {message.get('subject', '')}\n"
+            f"添付: {', '.join(Path(path).name for path in attachments) or 'なし'}\n\n"
+            f"{message.get('body', '')}"
+        )
+        PreviewDialog(self, "送信済みメールの内容", content).exec()
 
     def delete_selected(self):
         row = self.jobs.currentRow()
