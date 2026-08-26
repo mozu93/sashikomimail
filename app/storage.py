@@ -119,7 +119,7 @@ class Storage:
     def recipient_lists(self) -> list[dict]:
         with self.connect() as db:
             rows = db.execute("""SELECT id,name,source_name,headers_json,rows_json,updated_at
-                FROM recipient_lists ORDER BY name""").fetchall()
+                FROM recipient_lists ORDER BY updated_at DESC, id DESC""").fetchall()
         return [{
             "id": row[0], "name": row[1], "source_name": row[2],
             "headers": json.loads(row[3]),
@@ -129,7 +129,8 @@ class Storage:
 
     def save_recipient_list(self, name: str, source_name: str,
                             headers: list[str], rows: list[dict[str, str]]) -> None:
-        now = datetime.now().isoformat(timespec="seconds")
+        # 同一秒内の連続保存でも、最新の名簿を先頭へ確実に表示する。
+        now = datetime.now().isoformat(timespec="microseconds")
         with self.connect() as db:
             db.execute("""INSERT INTO recipient_lists
                 (name,source_name,headers_json,rows_json,updated_at)

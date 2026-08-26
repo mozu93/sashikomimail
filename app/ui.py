@@ -105,6 +105,13 @@ class NoWheelComboBox(QComboBox):
         event.ignore()
 
 
+class NoWheelListWidget(QListWidget):
+    """ホイール操作を親のスクロール領域へ渡す一覧。"""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class SendWorker(QThread):
     progress = pyqtSignal(int, int, str)
     logged = pyqtSignal(int, str, str, str, str)
@@ -206,6 +213,32 @@ class PreviewDialog(QDialog):
         close = QPushButton("閉じる")
         close.clicked.connect(self.accept)
         layout.addWidget(close)
+
+
+class BulkSendConfirmationDialog(QDialog):
+    """送信先を一覧で確認してから一括送信を確定する画面。"""
+
+    def __init__(self, parent, summary: str, recipients: list[str]):
+        super().__init__(parent)
+        self.setWindowTitle("一括送信の最終確認")
+        self.resize(680, 560)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(summary))
+        layout.addWidget(QLabel("以下のTo宛先へ送信します。内容を確認してから実行してください。"))
+        viewer = QPlainTextEdit("\n".join(
+            f"{number}. {address}" for number, address in enumerate(recipients, 1)))
+        viewer.setReadOnly(True)
+        layout.addWidget(viewer, 1)
+        buttons = QHBoxLayout()
+        send = QPushButton("この宛先へ一括送信")
+        send.setObjectName("primary")
+        send.clicked.connect(self.accept)
+        cancel = QPushButton("キャンセル")
+        cancel.clicked.connect(self.reject)
+        buttons.addStretch()
+        buttons.addWidget(send)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
 
 
 class AttachmentContentsDialog(QDialog):
@@ -550,16 +583,16 @@ class ComposeTab(QWidget):
         fixed_cc_pick.setToolTip("「連絡先」タブに登録した連絡先から選んで追記します")
         fixed_cc_pick.clicked.connect(lambda: self.pick_contacts(self.fixed_cc))
         fixed_cc_row = QHBoxLayout()
-        fixed_cc_row.addWidget(self.fixed_cc, 1)
         fixed_cc_row.addWidget(fixed_cc_pick)
+        fixed_cc_row.addWidget(self.fixed_cc, 1)
         self.bcc = QLineEdit()
         self.bcc.setPlaceholderText("複数指定は ; または , で区切る")
         bcc_pick = QPushButton("連絡先")
         bcc_pick.setToolTip("「連絡先」タブに登録した連絡先から選んで追記します")
         bcc_pick.clicked.connect(lambda: self.pick_contacts(self.bcc))
         bcc_row = QHBoxLayout()
-        bcc_row.addWidget(self.bcc, 1)
         bcc_row.addWidget(bcc_pick)
+        bcc_row.addWidget(self.bcc, 1)
         self.sender = NoWheelComboBox()
         self.sender.setToolTip(
             "この送信で使用する差出人を選択します。\n"
@@ -606,8 +639,9 @@ class ComposeTab(QWidget):
 
         tags = QGroupBox("利用可能タグ（ダブルクリックで本文へ挿入）")
         tags_layout = QVBoxLayout(tags)
-        self.tag_list = QListWidget()
-        self.tag_list.setMaximumHeight(105)
+        self.tag_list = NoWheelListWidget()
+        self.tag_list.setMinimumHeight(155)
+        self.tag_list.setMaximumHeight(190)
         self.tag_list.itemDoubleClicked.connect(
             lambda item: self.body.insertPlainText(item.text()))
         tags_layout.addWidget(self.tag_list)
@@ -671,6 +705,10 @@ class ComposeTab(QWidget):
         controls = QHBoxLayout()
         self.progress = QProgressBar()
         self.progress.setFormat("%v / %m件")
+        self.attachment_status = QLabel()
+        self.attachment_status.setStyleSheet(
+            "QLabel { color:#92400e; background:#fef3c7; border:1px solid #f59e0b;"
+            " border-radius:5px; padding:6px 9px; font-weight:bold; }")
         preview = QPushButton("選択行をプレビュー")
         preview.clicked.connect(self.preview_selected)
         attachment_preview = QPushButton("添付内容を確認")
@@ -685,6 +723,7 @@ class ComposeTab(QWidget):
         self.cancel_button.clicked.connect(self.cancel_send)
         self.cancel_button.hide()
         controls.addWidget(self.progress, 1)
+        controls.addWidget(self.attachment_status)
         controls.addWidget(preview)
         controls.addWidget(attachment_preview)
         controls.addWidget(self.test_button)
@@ -697,6 +736,7 @@ class ComposeTab(QWidget):
         self.refresh_templates()
         self.refresh_signatures()
         self.refresh_sender_options()
+        self.refresh_attachment_status()
 
     def refresh_templates(self):
         current = self.template_combo.currentText()
@@ -1247,6 +1287,30 @@ class ComposeTab(QWidget):
         self.attach_usage.setValue(min(total, limit))
         self.attach_usage.setFormat(
             f"{count}点 / {mb:.2f} MB（残り {remaining:.2f} MB・点数上限なし）")
+        self.refresh_attachment_status()
+
+    def refresh_attachment_status(self):
+        """送信操作のそばで、添付の有無を常に分かるようにする。"""
+        if not hasattr(self, "attachment_status"):
+            return
+        common_count = len(self.attachments)
+        individual_recipients = sum(
+            bool(paths) for paths in self.individual_attachments.values())
+        individual_files = sum(
+            len(paths) for paths in self.individual_attachments.values())
+        if common_count or individual_files:
+            details = []
+            if common_count:
+                details.append(f"共通 {common_count}点")
+            if individual_files:
+                details.append(
+                    f"個別 {individual_recipients}宛先・{individual_files}点")
+            self.attachment_status.setText("【添付あり】（" + " / ".join(details) + "）")
+            self.attachment_status.setToolTip(
+                "送信メールに添付ファイルがあります。送信前に「添付内容を確認」で確認できます。")
+        else:
+            self.attachment_status.setText("添付なし")
+            self.attachment_status.setToolTip("送信メールに添付ファイルはありません。")
 
     def set_individual_attachments(self):
         if not self.rows:
@@ -1288,6 +1352,7 @@ class ComposeTab(QWidget):
             f"{file_count}ファイルを割当")
         self.individual_label.setToolTip(
             f"フォルダ: {folder}\n未一致ファイル: {len(unmatched)}件")
+        self.refresh_attachment_status()
         details = (
             f"{len(self.rows)}件中 {len(mapping)}件へ、"
             f"合計{file_count}ファイルを割り当てました。\n"
@@ -1319,6 +1384,7 @@ class ComposeTab(QWidget):
             self.individual_label.setText(
                 "未設定（2列の値を「_」でつないでファイル名と照合します）")
             self.individual_label.setToolTip("")
+        self.refresh_attachment_status()
 
     def current_row(self) -> tuple[int, dict[str, str]] | None:
         index = self.table.currentRow()
@@ -1598,19 +1664,17 @@ class ComposeTab(QWidget):
                 f"照合: {'_'.join(self.individual_match_columns)}\n\n")
         else:
             attachment_summary = "個別添付: 未設定\n\n"
-        answer = QMessageBox.question(
-            self, "一括送信の最終確認",
+        summary = (
             f"{len(messages)}件を1件ずつ個別送信します。\n\n"
             f"認証アカウント: {account}\n"
             f"差出人: {from_address}\n\n"
             f"{attachment_summary}"
             "・案内の送信を了承している宛先ですか？\n"
             "・テスト送信で内容を確認しましたか？\n"
-            "・不達になったアドレスを名簿から整理していますか？\n\n"
-            "実行してよろしいですか？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No)
-        if answer == QMessageBox.StandardButton.Yes:
+            "・不達になったアドレスを名簿から整理していますか？")
+        dialog = BulkSendConfirmationDialog(
+            self, summary, [message["to_value"] for message in messages])
+        if dialog.exec() == QDialog.DialogCode.Accepted:
             self.job_id = self.storage.start_job(
                 Path(self.source_path).name, self.subject.text(), len(messages),
                 messages=messages)

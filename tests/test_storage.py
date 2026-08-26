@@ -25,6 +25,15 @@ def test_recipient_list_round_trip_and_update(tmp_path):
     assert storage.recipient_lists() == []
 
 
+def test_recipient_lists_are_newest_first(tmp_path):
+    storage = Storage(str(tmp_path / "test.db"))
+    storage.save_recipient_list("先に保存", "first.xlsx", ["メール"], [])
+    storage.save_recipient_list("後に保存", "last.xlsx", ["メール"], [])
+
+    assert [item["name"] for item in storage.recipient_lists()] == [
+        "後に保存", "先に保存"]
+
+
 def test_test_send_job_is_persisted_with_type(tmp_path):
     storage = Storage(str(tmp_path / "history.db"))
     job_id = storage.start_job(
