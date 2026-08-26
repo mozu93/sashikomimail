@@ -17,7 +17,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # openpyxlはNumPyを任意機能として読み込むが、本アプリでは使用しない。
+    # NumPy 2.3系をPyInstallerで同梱すると起動時に属性の解決に失敗するため除外する。
+    excludes=["numpy"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
