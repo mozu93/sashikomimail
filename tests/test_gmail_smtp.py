@@ -1,6 +1,8 @@
 import pytest
 
-from app.gmail_smtp import build_gmail_message, open_gmail_connection
+from app.gmail_smtp import build_gmail_message, open_gmail_connection, send_mail_gmail
+from app.graph import SendCancelled
+from app.ui import SendWorker
 
 
 def test_build_gmail_message_with_cc_and_attachment(tmp_path):
@@ -31,3 +33,40 @@ def test_build_gmail_message_without_cc_omits_header():
 def test_open_gmail_connection_requires_address_and_password():
     with pytest.raises(ValueError):
         open_gmail_connection({"gmail_address": "", "gmail_app_password": ""})
+
+
+def test_send_mail_returns_refused_recipients():
+    class FakeConnection:
+        def send_message(self, _message, **_kwargs):
+            return {"rejected@example.jp": (550, b"Rejected")}
+
+    refused = send_mail_gmail(
+        {"gmail_address": "from@example.jp"}, FakeConnection(), "to@example.jp", "", "",
+        "件名", "本文", [])
+    assert refused == {"rejected@example.jp": (550, b"Rejected")}
+
+
+def test_send_worker_interval_returns_immediately_after_cancellation():
+    worker = SendWorker({}, [], 60_000)
+    worker.cancel()
+    assert worker.wait_interval() is False
+
+
+def test_send_worker_records_graph_cancellation_without_error(monkeypatch):
+    message = {
+        "row_number": 2, "to_value": "to@example.jp", "cc_value": "", "bcc_value": "",
+        "subject": "件名", "body": "本文", "attachment_paths": [],
+    }
+    monkeypatch.setattr("app.ui.get_access_token", lambda _config: ("token", ""))
+    monkeypatch.setattr(
+        "app.ui.send_mail", lambda *_args, **_kwargs: (_ for _ in ()).throw(SendCancelled()))
+    worker = SendWorker({"provider": "m365"}, [message], 0)
+    completed = []
+    logged = []
+    worker.completed.connect(lambda *result: completed.append(result))
+    worker.logged.connect(lambda *result: logged.append(result))
+
+    worker.run()
+
+    assert completed == [(0, 0, True)]
+    assert logged == []

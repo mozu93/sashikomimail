@@ -24,7 +24,7 @@ from app.core import (
 )
 from app.gmail_smtp import GMAIL_ATTACHMENT_LIMIT, open_gmail_connection, send_mail_gmail
 from app.graph import (
-    ATTACHMENT_LIMIT, get_access_token, get_cached_accounts, send_mail, sign_out,
+    ATTACHMENT_LIMIT, SendCancelled, get_access_token, get_cached_accounts, send_mail, sign_out,
 )
 from app.storage import Storage
 from app.updater import (
@@ -126,6 +126,17 @@ class SendWorker(QThread):
     def cancel(self):
         self.cancelled = True
 
+    def wait_interval(self) -> bool:
+        """送信間隔中も中断ボタンをすぐ反映する。"""
+        remaining = self.interval_ms
+        while remaining > 0:
+            if self.cancelled:
+                return False
+            interval = min(remaining, 100)
+            self.msleep(interval)
+            remaining -= interval
+        return not self.cancelled
+
     @staticmethod
     def describe(message: dict) -> str:
         """進捗表示用に、宛先と添付ファイル名を1行にまとめる。"""
@@ -159,9 +170,22 @@ class SendWorker(QThread):
                         )
                     }
                     if provider == "gmail":
-                        send_mail_gmail(self.config, connection, **mail_message)
+                        refused = send_mail_gmail(self.config, connection, **mail_message)
+                        if refused:
+                            error += 1
+                            result = "一部の宛先が拒否"
+                            refused_addresses = "、".join(sorted(refused))
+                            self.logged.emit(
+                                message["row_number"], message["to_value"], message["subject"],
+                                "一部送信", f"Gmailに拒否された宛先: {refused_addresses}")
+                            self.progress.emit(index, total, f"{index}/{total}件 {result}　{detail}")
+                            if index < len(self.messages) and self.interval_ms:
+                                if not self.wait_interval():
+                                    break
+                            continue
                     else:
-                        send_mail(self.config, token, **mail_message)
+                        send_mail(self.config, token, is_cancelled=lambda: self.cancelled,
+                                  **mail_message)
                     success += 1
                     consecutive = 0
                     result = (
@@ -169,6 +193,9 @@ class SendWorker(QThread):
                         else "送信要求を受理")
                     self.logged.emit(message["row_number"], message["to_value"],
                                      message["subject"], "成功", "")
+                except SendCancelled:
+                    self.cancelled = True
+                    break
                 except Exception as exc:
                     error += 1
                     consecutive += 1
@@ -182,7 +209,8 @@ class SendWorker(QThread):
                 self.progress.emit(
                     index, total, f"{index}/{total}件 {result}　{detail}")
                 if index < len(self.messages) and self.interval_ms:
-                    self.msleep(self.interval_ms)
+                    if not self.wait_interval():
+                        break
         except Exception as exc:
             if self.messages and success == 0 and error == 0:
                 message = self.messages[0]
@@ -416,12 +444,14 @@ class UpdateBanner(QWidget):
             webbrowser.open(self.info.get("html_url", GITHUB_RELEASES_URL))
             return
         self.action.setEnabled(False)
-        threading.Thread(target=self._download, args=(url,), daemon=True).start()
+        threading.Thread(
+            target=self._download, args=(url, self.info.get("checksum_url", "")), daemon=True).start()
 
-    def _download(self, url: str):
+    def _download(self, url: str, checksum_url: str):
         try:
             path = download_installer(
                 url,
+                checksum_url,
                 lambda received, total: self.download_progress.emit(received, total),
             )
             self.download_finished.emit(path)
@@ -1630,7 +1660,8 @@ class ComposeTab(QWidget):
         message["subject"] = "【テスト】" + message["subject"]
         self.job_id = self.storage.start_job(
             Path(self.source_path).name if self.source_path else "保存済み名簿",
-            message["subject"], 1, job_type="test", messages=[message])
+            message["subject"], 1, job_type="test", messages=[message],
+            provider=settings.get("provider", "m365"))
         self.launch_worker([message], test=True)
 
     def start_send(self):
@@ -1677,7 +1708,7 @@ class ComposeTab(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.job_id = self.storage.start_job(
                 Path(self.source_path).name, self.subject.text(), len(messages),
-                messages=messages)
+                messages=messages, provider=settings.get("provider", "m365"))
             self.launch_worker(messages)
 
     def launch_worker(self, messages: list[dict], test: bool = False):
@@ -1747,9 +1778,10 @@ class ComposeTab(QWidget):
         if answer != QMessageBox.StandardButton.Yes:
             return
         subject = messages[0].get("subject", "再送信")
+        settings, _from_address = self.selected_sender_config()
         self.job_id = self.storage.start_job(
             "履歴から再送", subject, len(messages), job_type="retry",
-            messages=messages)
+            messages=messages, provider=settings.get("provider", "m365"))
         self.launch_worker(messages)
 
     def on_progress(self, value: int, total: int, text: str):
@@ -2023,7 +2055,7 @@ class HistoryTab(QWidget):
         note = QLabel(
             "送信履歴（エラー宛先は内容を確認後、元データを修正して再送信できます）\n"
             "「受理」または「送信完了」は送信サービスがメールを受け付けた件数です。"
-            "相手への到達を保証するものではありません。")
+            "相手への到達を保証するものではありません。不達通知はOutlookまたはGmailで確認してください。")
         note.setWordWrap(True)
         layout.addWidget(note)
         layout.addWidget(splitter)
@@ -2081,10 +2113,15 @@ class HistoryTab(QWidget):
             f"{len(logs)} / {len(all_logs)} 件" if query else f"{len(logs)} 件")
         self.logs.setRowCount(len(logs))
         for r, log in enumerate(logs):
-            for c, value in enumerate(log):
-                # 結果列の「成功」は受理の意味なので、表示だけ言い換える。
-                if c == 4 and value == "成功":
-                    value = "受理"
+            for c, value in enumerate(log[:6]):
+                if c == 4:
+                    if log[6] == "gmail" and value == "成功":
+                        value = "配信確認不可（Gmail）"
+                    elif value == "成功":
+                        value = "受理"
+                if c == 5:
+                    if log[6] == "gmail" and log[4] == "成功":
+                        value = "Gmailでは相手先への配信結果を取得できません。"
                 item = QTableWidgetItem(str(value))
                 item.setToolTip(str(value))
                 self.logs.setItem(r, c, item)

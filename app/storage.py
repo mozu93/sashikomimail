@@ -56,7 +56,8 @@ class Storage:
                     row_number INTEGER NOT NULL, to_address TEXT NOT NULL,
                     subject TEXT NOT NULL, payload_json TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
-                    error_message TEXT NOT NULL DEFAULT '');
+                    error_message TEXT NOT NULL DEFAULT '',
+                    provider TEXT NOT NULL DEFAULT 'm365');
             """)
             columns = {
                 row[1] for row in db.execute("PRAGMA table_info(send_jobs)").fetchall()
@@ -64,6 +65,15 @@ class Storage:
             if "job_type" not in columns:
                 db.execute(
                     "ALTER TABLE send_jobs ADD COLUMN job_type TEXT NOT NULL DEFAULT 'bulk'")
+            target_columns = {
+                row[1] for row in db.execute("PRAGMA table_info(send_targets)").fetchall()
+            }
+            if "provider" not in target_columns:
+                db.execute(
+                    "ALTER TABLE send_targets ADD COLUMN provider TEXT NOT NULL DEFAULT 'm365'")
+            # 配信追跡機能を廃止したため、過去に入力された追跡用資格情報も残さない。
+            db.execute("DELETE FROM settings WHERE key IN (?, ?)",
+                       ("trace_client_secret", "trace_sender_address"))
             self._migrate_sensitive_data(db)
 
     @staticmethod
@@ -87,6 +97,11 @@ class Storage:
                 WHERE id=?""",
                 (protect_text(to_address), protect_text(subject),
                  protect_text(error), row_id))
+        for row_id, file_name, subject in db.execute(
+                "SELECT id,file_name,subject FROM send_jobs").fetchall():
+            if not file_name.startswith("dpapi:") or not subject.startswith("dpapi:"):
+                db.execute("UPDATE send_jobs SET file_name=?,subject=? WHERE id=?",
+                           (protect_text(file_name), protect_text(subject), row_id))
 
     def connect(self):
         return sqlite3.connect(self.path)
@@ -245,22 +260,23 @@ class Storage:
 
     def start_job(self, file_name: str, subject: str, total: int,
                   job_type: str = "bulk",
-                  messages: list[dict] | None = None) -> int:
+                  messages: list[dict] | None = None,
+                  provider: str = "m365") -> int:
         with self.connect() as db:
             cur = db.execute("""INSERT INTO send_jobs
                 (created_at,file_name,subject,total,success,error,cancelled,job_type)
                 VALUES(?,?,?,?,0,0,0,?)""",
                 (datetime.now().isoformat(timespec="seconds"),
-                 file_name, subject, total, job_type))
+                 protect_text(file_name), protect_text(subject), total, job_type))
             job_id = int(cur.lastrowid)
             for message in messages or []:
                 db.execute("""INSERT INTO send_targets
-                    (job_id,row_number,to_address,subject,payload_json,status,error_message)
-                    VALUES(?,?,?,?,?,'pending','')""",
+                    (job_id,row_number,to_address,subject,payload_json,status,error_message,provider)
+                    VALUES(?,?,?,?,?,'pending','',?)""",
                     (job_id, message["row_number"],
                      protect_text(message["to_value"]),
                      protect_text(message["subject"]),
-                     protect_text(json.dumps(message, ensure_ascii=False))))
+                     protect_text(json.dumps(message, ensure_ascii=False)), provider))
             return job_id
 
     def add_log(self, job_id: int, row_number: int, to_address: str,
@@ -270,9 +286,10 @@ class Storage:
                 "SELECT id FROM send_targets WHERE job_id=? AND row_number=?",
                 (job_id, row_number)).fetchone()
             if target:
+                target_status = {"成功": "success", "一部送信": "partial"}.get(status, "error")
                 db.execute("""UPDATE send_targets SET status=?,error_message=?
                     WHERE id=?""",
-                    ("success" if status == "成功" else "error",
+                    (target_status,
                      protect_text(error), target[0]))
                 return
             db.execute("""INSERT INTO send_logs
@@ -288,27 +305,33 @@ class Storage:
 
     def jobs(self) -> list[tuple]:
         with self.connect() as db:
-            return db.execute("""SELECT id,created_at,file_name,subject,total,success,error,
+            rows = db.execute("""SELECT id,created_at,file_name,subject,total,success,error,
                 cancelled,job_type
                 FROM send_jobs ORDER BY id DESC""").fetchall()
+        return [
+            (row[0], row[1], unprotect_text(row[2]), unprotect_text(row[3]), *row[4:])
+            for row in rows
+        ]
 
     def logs(self, job_id: int) -> list[tuple]:
         with self.connect() as db:
-            targets = db.execute("""SELECT row_number,to_address,subject,payload_json,status,error_message
+            targets = db.execute("""SELECT row_number,to_address,subject,payload_json,status,error_message,
+                provider
                 FROM send_targets WHERE job_id=? ORDER BY id""", (job_id,)).fetchall()
             if targets:
-                label = {"success": "成功", "error": "エラー", "pending": "未送信"}
+                label = {"success": "成功", "error": "エラー", "pending": "未送信",
+                         "partial": "一部送信"}
                 return [
                     (row[0], json.loads(unprotect_text(row[3])).get("organization_name", ""),
                      unprotect_text(row[1]), unprotect_text(row[2]),
-                     label.get(row[4], row[4]), unprotect_text(row[5]))
+                     label.get(row[4], row[4]), unprotect_text(row[5]), row[6])
                     for row in targets
                 ]
             rows = db.execute("""SELECT row_number,to_address,subject,status,error_message
                 FROM send_logs WHERE job_id=? ORDER BY id""", (job_id,)).fetchall()
         return [
             (row[0], "", unprotect_text(row[1]), unprotect_text(row[2]), row[3],
-             unprotect_text(row[4]))
+             unprotect_text(row[4]), "")
             for row in rows
         ]
 

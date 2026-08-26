@@ -47,12 +47,18 @@ jobs:
             Select-Object -First 1
           $name = "SashikomiMail-Setup-$tag.exe"
           Copy-Item -LiteralPath $source.FullName -Destination $name
+          $checksumName = "$name.sha256"
+          $hash = (Get-FileHash -LiteralPath $name -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath $checksumName -Value "$hash *$name" -Encoding ascii -NoNewline
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "name=$name" >> $env:GITHUB_OUTPUT
+          "checksum_name=$checksumName" >> $env:GITHUB_OUTPUT
       - uses: actions/upload-artifact@v4
         with:
           name: SashikomiMail-Windows-${{ steps.artifact.outputs.tag }}
-          path: ${{ steps.artifact.outputs.name }}
+          path: |
+            ${{ steps.artifact.outputs.name }}
+            ${{ steps.artifact.outputs.checksum_name }}
       - name: Create or update GitHub Release
         shell: pwsh
         env:
@@ -60,9 +66,10 @@ jobs:
         run: |
           $tag = "${{ steps.artifact.outputs.tag }}"
           $asset = "${{ steps.artifact.outputs.name }}"
+          $checksum = "${{ steps.artifact.outputs.checksum_name }}"
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $asset --clobber
+            gh release upload $tag $asset $checksum --clobber
           } else {
-            gh release create $tag $asset --title "SashikomiMail $tag" --notes-file RELEASE_NOTES.md
+            gh release create $tag $asset $checksum --title "SashikomiMail $tag" --notes-file RELEASE_NOTES.md
           }

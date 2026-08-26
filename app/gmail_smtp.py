@@ -7,8 +7,8 @@ from pathlib import Path
 
 from app.core import split_addresses
 
-# Gmail送信の実用上限（約25MB）。Graph APIの2.5MB制限とは別に扱う。
-GMAIL_ATTACHMENT_LIMIT = 25 * 1024 * 1024
+# Gmailの添付上限とMIMEエンコードによる増加を考慮した安全上限。
+GMAIL_ATTACHMENT_LIMIT = 20 * 1024 * 1024
 
 _GMAIL_SMTP_HOST = "smtp.gmail.com"
 _GMAIL_SMTP_PORT = 465
@@ -59,7 +59,7 @@ def sanitize_smtp_error(error: Exception) -> str:
 
 def send_mail_gmail(gmail_config: dict, connection: smtplib.SMTP_SSL, to_value: str,
                     cc_value: str, bcc_value: str, subject: str, body: str,
-                    attachment_paths: list[str]) -> None:
+                    attachment_paths: list[str]) -> dict[str, tuple[int, bytes]]:
     address = gmail_config.get("gmail_address", "").strip()
     message = build_gmail_message(
         address, to_value, cc_value, bcc_value, subject, body, attachment_paths)
@@ -67,6 +67,6 @@ def send_mail_gmail(gmail_config: dict, connection: smtplib.SMTP_SSL, to_value: 
         split_addresses(to_value) + split_addresses(cc_value) + split_addresses(bcc_value)
     )
     try:
-        connection.send_message(message, from_addr=address, to_addrs=recipients)
+        return connection.send_message(message, from_addr=address, to_addrs=recipients)
     except smtplib.SMTPException as exc:
         raise RuntimeError(sanitize_smtp_error(exc)) from exc

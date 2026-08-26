@@ -4,6 +4,7 @@ import base64
 import mimetypes
 import time
 from pathlib import Path
+from typing import Callable
 
 import msal
 import requests
@@ -15,6 +16,39 @@ from app.storage import data_dir
 # GraphのJSON直接送信ではBase64化で約4/3に増えるため、
 # 3MB未満のAPI境界に余裕を持たせて生ファイル合計を2.5MBに制限する。
 ATTACHMENT_LIMIT = int(2.5 * 1024 * 1024)
+
+
+class SendCancelled(Exception):
+    """送信要求の前、または再試行待機中に利用者が中断したことを表す。"""
+
+
+def sanitize_graph_error(status_code: int) -> str:
+    """Graphの応答本文を保存せず、利用者向けの安全なエラーにする。"""
+    messages = {
+        400: "Microsoft 365への送信要求が正しくありません。宛先・添付・設定を確認してください。",
+        401: "Microsoft 365の認証が無効または期限切れです。再認証してください。",
+        403: "Microsoft 365でこのメールを送信する権限がありません。設定を確認してください。",
+        404: "Microsoft 365の送信先APIが見つかりません。設定を確認してください。",
+        413: "メールまたは添付ファイルの容量が大きすぎます。",
+        429: "Microsoft 365の送信上限に達しました。時間をおいて再試行してください。",
+    }
+    if status_code in messages:
+        return messages[status_code]
+    if 500 <= status_code <= 599:
+        return "Microsoft 365側で一時的なエラーが発生しました。時間をおいて再試行してください。"
+    return "Microsoft 365への送信でエラーが発生しました。"
+
+
+def _wait_with_cancellation(seconds: float, is_cancelled: Callable[[], bool] | None) -> bool:
+    """待機を短く区切り、中断要求があれば直ちに戻る。"""
+    remaining = max(0.0, seconds)
+    while remaining > 0:
+        if is_cancelled and is_cancelled():
+            return False
+        interval = min(remaining, 0.1)
+        time.sleep(interval)
+        remaining -= interval
+    return not is_cancelled or not is_cancelled()
 
 
 def _public_client(config: dict):
@@ -105,14 +139,22 @@ def build_payload(to_value: str, cc_value: str, bcc_value: str, subject: str,
     return {"message": message, "saveToSentItems": True}
 
 
-def send_mail(config: dict, token: str, **message) -> None:
+def send_mail(config: dict, token: str, *, is_cancelled: Callable[[], bool] | None = None,
+              **message) -> None:
     payload = build_payload(from_address=config.get("from_address", ""), **message)
     for attempt in range(4):
-        response = requests.post(
-            "https://graph.microsoft.com/v1.0/me/sendMail",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json=payload, timeout=30,
-        )
+        if is_cancelled and is_cancelled():
+            raise SendCancelled()
+        try:
+            response = requests.post(
+                "https://graph.microsoft.com/v1.0/me/sendMail",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json=payload, timeout=30,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                "Microsoft 365サーバーへ接続できませんでした。時間をおいて再試行してください。"
+            ) from exc
         if response.status_code in (200, 202):
             return
         if response.status_code == 429 and attempt < 3:
@@ -120,6 +162,7 @@ def send_mail(config: dict, token: str, **message) -> None:
                 delay = min(int(response.headers.get("Retry-After", "5")), 60)
             except ValueError:
                 delay = 5
-            time.sleep(delay)
+            if not _wait_with_cancellation(delay, is_cancelled):
+                raise SendCancelled()
             continue
-        raise RuntimeError(f"送信失敗 ({response.status_code}): {response.text[:300]}")
+        raise RuntimeError(sanitize_graph_error(response.status_code))

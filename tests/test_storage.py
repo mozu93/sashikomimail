@@ -46,6 +46,16 @@ def test_test_send_job_is_persisted_with_type(tmp_path):
     assert storage.logs(job_id)[0][4] == "成功"
 
 
+def test_job_file_name_and_subject_are_encrypted_at_rest(tmp_path):
+    storage = Storage(str(tmp_path / "history.db"))
+    job_id = storage.start_job("人事名簿.xlsx", "個人情報を含む件名", 1)
+    with storage.connect() as db:
+        raw = db.execute(
+            "SELECT file_name,subject FROM send_jobs WHERE id=?", (job_id,)).fetchone()
+    assert all(value.startswith("dpapi:") for value in raw)
+    assert storage.jobs()[0][2:4] == ("人事名簿.xlsx", "個人情報を含む件名")
+
+
 def test_template_round_trip_update_by_id_and_delete(tmp_path):
     storage = Storage(str(tmp_path / "template.db"))
     storage.save_template("案内", "件名A", "本文A")
@@ -110,6 +120,16 @@ def test_pending_and_failed_targets_can_be_retried(tmp_path):
     assert storage.retry_messages(job_id) == messages
 
 
+def test_partially_delivered_target_is_not_retried(tmp_path):
+    message = {"row_number": 2, "to_value": "a@example.jp", "subject": "A",
+               "body": "本文", "cc_value": "", "bcc_value": "", "attachment_paths": []}
+    storage = Storage(str(tmp_path / "partial.db"))
+    job_id = storage.start_job("名簿.xlsx", "案内", 1, messages=[message], provider="gmail")
+    storage.add_log(job_id, 2, "a@example.jp", "A", "一部送信", "Gmailに拒否された宛先があります。")
+    assert storage.logs(job_id)[0][4] == "一部送信"
+    assert storage.retry_messages(job_id) == []
+
+
 def test_sensitive_recipient_data_is_not_plaintext_in_database(tmp_path):
     storage = Storage(str(tmp_path / "encrypted.db"))
     storage.save_recipient_list(
@@ -160,3 +180,13 @@ def test_unreadable_setting_is_skipped_instead_of_raising(tmp_path):
     settings = storage.settings()
     assert settings["tenant_id"] == "abc"
     assert "interval_ms" not in settings
+
+
+def test_retired_delivery_trace_credentials_are_removed(tmp_path):
+    path = tmp_path / "retired-settings.db"
+    storage = Storage(str(path))
+    storage.save_settings({"trace_client_secret": "secret", "trace_sender_address": "a@example.jp"})
+
+    reopened = Storage(str(path))
+    assert "trace_client_secret" not in reopened.settings()
+    assert "trace_sender_address" not in reopened.settings()
