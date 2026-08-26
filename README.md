@@ -4,7 +4,7 @@
 
 Windows / Microsoft 365・Gmail対応の差し込みメール送信デスクトップアプリです。
 
-最新バージョン：**1.3.5**
+最新バージョン：**1.3.6**
 
 Excel / CSV の任意列を差し込みタグとして使用し、Microsoft 365（Microsoft
 Graph API）または Gmail（SMTP）から個別メールを一括送信する Windows

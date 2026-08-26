@@ -1,5 +1,5 @@
 #define MyAppName "差し込みメール送信"
-#define MyAppVersion "1.3.5"
+#define MyAppVersion "1.3.6"
 #define MyAppPublisher "四日市商工会議所"
 #define MyAppExeName "SashikomiMail.exe"
 
@@ -21,6 +21,12 @@ ArchitecturesInstallIn64BitMode=x64compatible
 
 [Files]
 Source: "..\dist\SashikomiMail\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[InstallDelete]
+; v1.3.4以前が同梱したNumPyのバイナリを、上書き更新時にも残さない。
+; 残るとv1.3.5以降がNumPyを除外していても、古い断片を読み込んで起動に失敗する。
+Type: filesandordirs; Name: "{app}\_internal\numpy"
+Type: filesandordirs; Name: "{app}\_internal\numpy.libs"
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
