@@ -180,6 +180,46 @@ def carrier_domain_counts(addresses: Iterable[str]) -> dict[str, int]:
     return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
 
+# 宛先列の列名によく使われる語。名簿ごとに列名は自由なので
+# 「メール」「mail」だけでは「アドレス」「送信先」等を取りこぼす。
+EMAIL_COLUMN_HINTS = (
+    "メールアドレス", "メール", "mail", "e-mail", "email",
+    "アドレス", "address", "宛先", "送信先", "連絡先",
+)
+
+
+def guess_email_column(headers: list[str],
+                       rows: list[dict[str, str]] | None = None) -> str:
+    """宛先に使えそうな列名を推測する。判別できなければ空文字を返す。
+
+    列名の照合はNFKC正規化して行う（「Ｅメール」「ＭＡＩＬ」等の
+    全角表記も拾うため）。列名で決まらない場合は、実際の値が
+    メールアドレスとして妥当な列を数えて最も多い列を選ぶ。
+    どちらでも決まらなければ空文字を返し、呼び出し側で
+    「未選択」として扱わせる（先頭列へ暗黙に倒さない）。
+    """
+    normalized = [(header, normalize_search_text(header)) for header in headers]
+    for hint in EMAIL_COLUMN_HINTS:
+        needle = normalize_search_text(hint)
+        for header, name in normalized:
+            if needle in name:
+                return header
+    if not rows:
+        return ""
+    best, best_count = "", 0
+    for header in headers:
+        count = sum(
+            1 for row in rows
+            if (values := split_addresses(row.get(header, "")))
+            and all(is_valid_email(value) for value in values)
+        )
+        if count > best_count:
+            best, best_count = header, count
+    # 半数以上の行が妥当なアドレスの列だけを採用する。
+    # 少数の行だけ当たる列を宛先にすると取り違えになる。
+    return best if best_count * 2 >= len(rows) else ""
+
+
 def validate_rows(rows: list[dict[str, str]], to_column: str,
                   cc_column: str = "",
                   row_numbers: list[int] | None = None) -> dict[int, list[str]]:

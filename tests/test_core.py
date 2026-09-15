@@ -3,9 +3,10 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 
 from app.core import (
-    carrier_domain_counts, export_recipient_file, load_recipient_file,
-    match_individual_attachments, normalize_search_text, render_template, split_addresses,
-    typo_domain_suspects, unknown_tags, validate_rows,
+    carrier_domain_counts, export_recipient_file, guess_email_column,
+    load_recipient_file, match_individual_attachments, normalize_search_text,
+    render_template, split_addresses, typo_domain_suspects, unknown_tags,
+    validate_rows,
 )
 
 
@@ -133,3 +134,35 @@ def test_match_individual_attachments_by_two_column_values(tmp_path):
         ["NO.", "事業所名"], [str(exact), str(extra), str(wrong)])
     assert mapping == {0: sorted([str(exact), str(extra)])}
     assert unmatched == [str(wrong)]
+
+
+def test_guess_email_column_matches_various_header_names():
+    rows = [{"№": "1", "氏名": "山田", "値": "taro@example.co.jp"}]
+    for header in ("メールアドレス", "アドレス", "E-mail", "Ｅメール", "送信先", "MAIL"):
+        headers = ["№", "氏名", header]
+        assert guess_email_column(headers, [{**rows[0], header: "taro@example.co.jp"}]) == header
+
+
+def test_guess_email_column_falls_back_to_values_when_header_is_unclear():
+    # 列名に手がかりが無くても、値がアドレスの列を選べる。
+    headers = ["№", "氏名", "連絡"]
+    rows = [{"№": str(i), "氏名": "山田", "連絡": f"user{i}@example.co.jp"}
+            for i in range(10)]
+    assert guess_email_column(headers, rows) == "連絡"
+
+
+def test_guess_email_column_returns_empty_when_no_column_looks_like_email():
+    # 判別できないときに先頭列へ倒れないことを保証する。
+    # ここで「№」を返すと、番号列が宛先として採用され全行がエラーになる。
+    headers = ["№", "氏名", "事業所名"]
+    rows = [{"№": str(i), "氏名": "山田", "事業所名": "株式会社テスト"}
+            for i in range(10)]
+    assert guess_email_column(headers, rows) == ""
+
+
+def test_guess_email_column_ignores_column_with_few_addresses():
+    # 少数行だけアドレスらしい列を宛先に採用すると取り違えになる。
+    headers = ["№", "備考"]
+    rows = [{"№": str(i), "備考": "a@example.co.jp" if i < 2 else "なし"}
+            for i in range(10)]
+    assert guess_email_column(headers, rows) == ""

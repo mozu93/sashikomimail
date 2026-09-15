@@ -17,10 +17,10 @@ from PyQt6.QtWidgets import (
 )
 
 from app.core import (
-    carrier_domain_counts, export_recipient_file, is_valid_email,
-    load_recipient_file, match_individual_attachments, render_template,
-    normalize_search_text, split_addresses, typo_domain_suspects, unknown_tags,
-    validate_rows,
+    carrier_domain_counts, export_recipient_file, guess_email_column,
+    is_valid_email, load_recipient_file, match_individual_attachments,
+    normalize_search_text, render_template, split_addresses,
+    typo_domain_suspects, unknown_tags, validate_rows,
 )
 from app.gmail_smtp import GMAIL_ATTACHMENT_LIMIT, open_gmail_connection, send_mail_gmail
 from app.graph import (
@@ -32,6 +32,11 @@ from app.updater import (
     is_newer_version, launch_installer,
 )
 from app.version import __version__
+
+# To列コンボの未選択を表す項目。QComboBoxは addItems 直後に先頭項目を
+# 選ぶため、この項目を先頭に置いて「列を選んでいない」状態を表現する。
+# これが無いと推測に失敗したとき先頭列（「№」等）が黙って宛先になる。
+TO_COLUMN_PLACEHOLDER = "— 列を選択してください —"
 
 # 背景色を指定した箇所には必ず文字色も指定する。
 # 文字色を省略するとOSのダークモード時にパレット由来の白文字が使われ、
@@ -606,6 +611,10 @@ class ComposeTab(QWidget):
         destination = QGroupBox("3. 宛先設定")
         form = QFormLayout(destination)
         self.to_column = NoWheelComboBox()
+        self.to_column.setToolTip(
+            "メールアドレスが入っている列を選びます。\n"
+            "読み込み直後は未選択です。\n"
+            "列名から判別できた場合のみ自動で選ばれます。")
         self.to_column.currentTextChanged.connect(self.on_validation_columns_changed)
         self.fixed_cc = QLineEdit()
         self.fixed_cc.setPlaceholderText("複数指定は ; または , で区切る")
@@ -902,6 +911,7 @@ class ComposeTab(QWidget):
         self.recipient_display_name = source_name
         self.file_label.setText(f"{source_name}（{len(self.rows)}件）")
         self.to_column.clear()
+        self.to_column.addItem(TO_COLUMN_PLACEHOLDER)
         self.to_column.addItems(self.headers)
         self.filter_column.clear()
         self.filter_column.addItems(self.headers)
@@ -909,9 +919,11 @@ class ComposeTab(QWidget):
         self.search_value.blockSignals(True)
         self.search_value.clear()
         self.search_value.blockSignals(False)
-        guessed = next((h for h in self.headers if "メール" in h or "mail" in h.lower()), "")
-        if guessed:
-            self.to_column.setCurrentText(guessed)
+        guessed = guess_email_column(self.headers, self.rows)
+        # 推測が外れたときはプレースホルダのまま残し、先頭列を黙って
+        # 宛先に採用しない。QComboBoxは addItems 直後に先頭を選ぶため、
+        # 明示的に未選択へ戻さないと「№」等が宛先になってしまう。
+        self.to_column.setCurrentText(guessed or TO_COLUMN_PLACEHOLDER)
         self.tag_list.clear()
         self.tag_list.addItems([f"{{{header}}}" for header in self.headers])
         self.render_table()
@@ -1021,15 +1033,26 @@ class ComposeTab(QWidget):
         self.active_filter_label.setText(" ／ ".join(parts))
         self.active_filter_label.setVisible(bool(parts))
 
+    def selected_to_column(self) -> str:
+        """選択中のTo列名。未選択ならプレースホルダではなく空文字を返す。"""
+        column = self.to_column.currentText()
+        return "" if column == TO_COLUMN_PLACEHOLDER else column
+
     def refresh_validation(self):
         self.update_active_filter_label()
-        if not self.rows or not self.to_column.currentText():
-            self.summary.setText(f"表示 0件 / 送信対象 0件 / 全{len(self.rows)}件")
+        if not self.rows or not self.selected_to_column():
+            # 未選択の理由を出さないと「アドレス列はあるのに0件」に見えてしまう。
+            hint = (
+                "　←「To列（必須）」でアドレスの列を選んでください"
+                if self.rows and not self.selected_to_column() else ""
+            )
+            self.summary.setText(
+                f"表示 0件 / 送信対象 0件 / 全{len(self.rows)}件{hint}")
             return
         indices = self.filtered_indices or []
         target_rows = [self.rows[index] for index in indices]
         subset_errors = validate_rows(
-            target_rows, self.to_column.currentText(),
+            target_rows, self.selected_to_column(),
             row_numbers=[index + 2 for index in indices])
         errors = {indices[index]: value for index, value in subset_errors.items()}
         self.validation_errors = errors
@@ -1425,7 +1448,7 @@ class ComposeTab(QWidget):
         )
 
     def message_for(self, index: int, row: dict[str, str], test_to: str = "") -> dict:
-        to_value = test_to or row.get(self.to_column.currentText(), "")
+        to_value = test_to or row.get(self.selected_to_column(), "")
         body = render_template(self.body.toPlainText(), row)
         signature = self.signature_combo.currentData() or ""
         if signature:
@@ -1480,7 +1503,7 @@ class ComposeTab(QWidget):
         誤送信・不達になっても送信側にエラーが返らない。
         """
         addresses = []
-        column = self.to_column.currentText()
+        column = self.selected_to_column()
         if column:
             for row in target_rows:
                 addresses.extend(split_addresses(row.get(column, "")))
@@ -1527,6 +1550,12 @@ class ComposeTab(QWidget):
         if not self.rows:
             QMessageBox.warning(self, "確認", "宛先データを読み込んでください。")
             return None
+        if not self.selected_to_column():
+            QMessageBox.warning(
+                self, "確認",
+                "「3. 宛先設定」の「To列（必須）」で、"
+                "メールアドレスが入っている列を選択してください。")
+            return None
         target_indices = [
             index for index in self.filtered_indices if index in self.included_rows
         ]
@@ -1535,7 +1564,7 @@ class ComposeTab(QWidget):
             return None
         target_rows = [self.rows[index] for index in target_indices]
         errors = validate_rows(
-            target_rows, self.to_column.currentText(),
+            target_rows, self.selected_to_column(),
             row_numbers=[index + 2 for index in target_indices])
         unapproved_errors = {
             target_indices[index]: issues
