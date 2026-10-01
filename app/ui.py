@@ -740,6 +740,9 @@ class ComposeTab(QWidget):
         self.search_value.setPlaceholderText("全列から検索（入力するとすぐに反映）")
         self.search_value.setClearButtonEnabled(True)
         self.search_value.textChanged.connect(self.update_visible_rows)
+        add_row_button = QPushButton("行を追加")
+        add_row_button.setToolTip("名簿の末尾に空の行を追加し、そのまま入力できます")
+        add_row_button.clicked.connect(self.add_row)
         delete_row_button = QPushButton("選択行を削除")
         delete_row_button.setObjectName("danger")
         delete_row_button.clicked.connect(self.delete_selected_row)
@@ -750,6 +753,7 @@ class ComposeTab(QWidget):
         search_row.addWidget(QLabel("検索"))
         search_row.addWidget(self.search_value, 1)
         search_row.addWidget(approve_error_button)
+        search_row.addWidget(add_row_button)
         search_row.addWidget(delete_row_button)
         self.summary = QLabel("0件")
         self.active_filter_label = QLabel("")
@@ -1351,6 +1355,29 @@ class ComposeTab(QWidget):
             self.update_visible_rows()
         else:
             self.refresh_validation()
+
+    def add_row(self):
+        if not self.headers:
+            QMessageBox.information(
+                self, "行の追加", "先にExcel・CSVまたは保存済み名簿を読み込んでください。")
+            return
+        # 追加した行が絞り込み・検索で隠れないよう、先に条件を解除する。
+        self.clear_filter()
+        self.search_value.clear()
+        index = len(self.rows)
+        self.rows.append({header: "" for header in self.headers})
+        self.row_origin.append(max(self.row_origin, default=-1) + 1)
+        self.included_rows.add(index)
+        self.filter_indices = list(range(len(self.rows)))
+        self.file_label.setText(
+            f"{self.recipient_display_name}（{len(self.rows)}件）")
+        self.render_table()
+        self.update_visible_rows()
+        self.table.selectRow(index)
+        edit_item = self.table.item(index, 1)
+        self.table.scrollToItem(edit_item)
+        self.table.setCurrentItem(edit_item)
+        self.table.editItem(edit_item)
 
     def delete_selected_row(self):
         row_index = self.table.currentRow()
