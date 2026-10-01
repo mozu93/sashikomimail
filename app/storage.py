@@ -155,6 +155,17 @@ class Storage:
                 (name, source_name, json.dumps(headers, ensure_ascii=False),
                  protect_text(json.dumps(rows, ensure_ascii=False)), now))
 
+    def rename_recipient_list(self, list_id: int, new_name: str) -> None:
+        """名簿名を変更する。同名の別名簿が既にある場合は ValueError。"""
+        with self.connect() as db:
+            clash = db.execute(
+                "SELECT 1 FROM recipient_lists WHERE name=? AND id<>?",
+                (new_name, list_id)).fetchone()
+            if clash:
+                raise ValueError(f"名簿名「{new_name}」は既に使われています。")
+            db.execute("UPDATE recipient_lists SET name=? WHERE id=?",
+                       (new_name, list_id))
+
     def delete_recipient_list(self, list_id: int) -> None:
         with self.connect() as db:
             db.execute("DELETE FROM recipient_lists WHERE id=?", (list_id,))

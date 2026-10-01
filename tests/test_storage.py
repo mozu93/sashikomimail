@@ -34,6 +34,30 @@ def test_recipient_lists_are_newest_first(tmp_path):
         "後に保存", "先に保存"]
 
 
+def test_rename_recipient_list_keeps_rows(tmp_path):
+    storage = Storage(str(tmp_path / "test.db"))
+    storage.save_recipient_list("旧名", "a.xlsx", ["氏名"], [{"氏名": "山田"}])
+    list_id = storage.recipient_lists()[0]["id"]
+
+    storage.rename_recipient_list(list_id, "新名")
+
+    saved = storage.recipient_lists()
+    assert [item["name"] for item in saved] == ["新名"]
+    assert saved[0]["rows"] == [{"氏名": "山田"}]
+
+
+def test_rename_recipient_list_rejects_duplicate_name(tmp_path):
+    import pytest
+    storage = Storage(str(tmp_path / "test.db"))
+    storage.save_recipient_list("A", "a.xlsx", ["氏名"], [])
+    storage.save_recipient_list("B", "b.xlsx", ["氏名"], [])
+    target = next(i for i in storage.recipient_lists() if i["name"] == "B")
+
+    with pytest.raises(ValueError):
+        storage.rename_recipient_list(target["id"], "A")
+    assert {i["name"] for i in storage.recipient_lists()} == {"A", "B"}
+
+
 def test_test_send_job_is_persisted_with_type(tmp_path):
     storage = Storage(str(tmp_path / "history.db"))
     job_id = storage.start_job(

@@ -396,6 +396,171 @@ class ContactPickerDialog(QDialog):
         return emails
 
 
+class RecipientListManagerDialog(QDialog):
+    PREVIEW_ROWS = 5
+
+    def __init__(self, parent, storage: Storage):
+        super().__init__(parent)
+        self.storage = storage
+        self.selected_list: dict | None = None
+        self.items: dict[int, dict] = {}
+        self.setWindowTitle("保存済み名簿の管理")
+        self.resize(720, 520)
+        layout = QVBoxLayout(self)
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("名簿名・元ファイル名で検索")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self.apply_filter)
+        layout.addWidget(self.search)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["名簿名", "件数", "元ファイル", "更新日時"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch)
+        for column in (1, 3):
+            self.table.horizontalHeader().setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setWordWrap(False)
+        self.table.itemSelectionChanged.connect(self.update_state)
+        self.table.itemDoubleClicked.connect(lambda _item: self.open_selected())
+        layout.addWidget(self.table, 1)
+
+        self.preview_label = QLabel("")
+        layout.addWidget(self.preview_label)
+        self.preview = QTableWidget(0, 0)
+        self.preview.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.preview.setMaximumHeight(150)
+        layout.addWidget(self.preview)
+
+        buttons = QHBoxLayout()
+        self.open_button = QPushButton("開く")
+        self.open_button.setObjectName("primary")
+        self.open_button.clicked.connect(self.open_selected)
+        self.rename_button = QPushButton("名前変更")
+        self.rename_button.clicked.connect(self.rename_selected)
+        self.delete_button = QPushButton("削除")
+        self.delete_button.setObjectName("danger")
+        self.delete_button.clicked.connect(self.delete_selected)
+        close = QPushButton("閉じる")
+        close.clicked.connect(self.reject)
+        buttons.addWidget(self.open_button)
+        buttons.addWidget(self.rename_button)
+        buttons.addWidget(self.delete_button)
+        buttons.addStretch(1)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+        self.reload()
+
+    def reload(self):
+        # 名簿の全行を復号するため、読み込みは開いたとき・変更したときだけにする。
+        self.items = {item["id"]: item for item in self.storage.recipient_lists()}
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(self.items))
+        for row, item in enumerate(self.items.values()):
+            name = QTableWidgetItem(item["name"])
+            name.setData(Qt.ItemDataRole.UserRole, item["id"])
+            count = QTableWidgetItem()
+            count.setData(Qt.ItemDataRole.DisplayRole, len(item["rows"]))
+            count.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.table.setItem(row, 0, name)
+            self.table.setItem(row, 1, count)
+            self.table.setItem(row, 2, QTableWidgetItem(item["source_name"]))
+            self.table.setItem(
+                row, 3, QTableWidgetItem(item["updated_at"][:19].replace("T", " ")))
+        self.table.setSortingEnabled(True)
+        self.table.sortByColumn(3, Qt.SortOrder.DescendingOrder)
+        self.apply_filter()
+        self.update_state()
+
+    def apply_filter(self):
+        keyword = normalize_search_text(self.search.text())
+        for row in range(self.table.rowCount()):
+            text = normalize_search_text(
+                f"{self.table.item(row, 0).text()} {self.table.item(row, 2).text()}")
+            self.table.setRowHidden(row, bool(keyword) and keyword not in text)
+
+    def selected_ids(self) -> list[int]:
+        rows = {index.row() for index in self.table.selectionModel().selectedRows()}
+        return [self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+                for row in sorted(rows)]
+
+    def update_state(self):
+        ids = self.selected_ids()
+        self.open_button.setEnabled(len(ids) == 1)
+        self.rename_button.setEnabled(len(ids) == 1)
+        self.delete_button.setEnabled(bool(ids))
+        self.show_preview(self.items[ids[0]] if len(ids) == 1 else None)
+
+    def show_preview(self, item: dict | None):
+        self.preview.clear()
+        if item is None:
+            self.preview_label.setText("名簿を1件選択すると内容を確認できます。")
+            self.preview.setRowCount(0)
+            self.preview.setColumnCount(0)
+            return
+        rows = item["rows"][:self.PREVIEW_ROWS]
+        self.preview_label.setText(
+            f"プレビュー（先頭{len(rows)}件／全{len(item['rows'])}件）")
+        self.preview.setColumnCount(len(item["headers"]))
+        self.preview.setHorizontalHeaderLabels(item["headers"])
+        self.preview.setRowCount(len(rows))
+        for r, data in enumerate(rows):
+            for c, header in enumerate(item["headers"]):
+                self.preview.setItem(r, c, QTableWidgetItem(str(data.get(header, ""))))
+
+    def open_selected(self):
+        ids = self.selected_ids()
+        if len(ids) != 1:
+            return
+        self.selected_list = self.items[ids[0]]
+        self.accept()
+
+    def rename_selected(self):
+        ids = self.selected_ids()
+        if len(ids) != 1:
+            return
+        item = self.items[ids[0]]
+        name, ok = QInputDialog.getText(
+            self, "名簿名の変更", "新しい名簿名:", QLineEdit.EchoMode.Normal, item["name"])
+        name = name.strip()
+        if not ok or not name or name == item["name"]:
+            return
+        try:
+            self.storage.rename_recipient_list(item["id"], name)
+        except ValueError as exc:
+            QMessageBox.warning(self, "名簿名の変更", str(exc))
+            return
+        self.reload()
+
+    def delete_selected(self):
+        ids = self.selected_ids()
+        if not ids:
+            return
+        names = "\n".join(
+            f"・{self.items[i]['name']}（{len(self.items[i]['rows'])}件）" for i in ids[:10])
+        if len(ids) > 10:
+            names += f"\n…ほか{len(ids) - 10}件"
+        answer = QMessageBox.question(
+            self, "名簿削除の確認",
+            f"次の名簿{len(ids)}件を削除します。\n\n{names}\n\n"
+            "この操作は元に戻せません。削除してよろしいですか？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        for list_id in ids:
+            self.storage.delete_recipient_list(list_id)
+        self.reload()
+
+
 class UpdateBanner(QWidget):
     update_found = pyqtSignal(dict)
     download_progress = pyqtSignal(int, int)
@@ -531,20 +696,18 @@ class ComposeTab(QWidget):
         choose.clicked.connect(self.choose_file)
         save_list = QPushButton("現在の名簿を保存")
         save_list.clicked.connect(self.save_recipient_list)
-        open_list = QPushButton("保存済み名簿を開く")
+        open_list = QPushButton("保存済み名簿を管理…")
+        open_list.setToolTip("保存済み名簿の検索・読み込み・名前変更・削除を行います")
         open_list.clicked.connect(self.open_recipient_list)
-        delete_list = QPushButton("保存済み名簿を削除")
-        delete_list.clicked.connect(self.delete_recipient_list)
         export_button = QPushButton("Excelとして出力")
         export_button.setToolTip("セル編集や行削除を反映した現在のデータをExcelファイルに出力します")
         export_button.clicked.connect(self.export_recipient_data)
         source_layout.addWidget(choose, 0, 0)
         source_layout.addWidget(open_list, 0, 1)
         source_layout.addWidget(save_list, 0, 2)
-        source_layout.addWidget(delete_list, 0, 3)
-        source_layout.addWidget(export_button, 0, 4)
-        source_layout.addWidget(self.file_label, 1, 0, 1, 5)
-        source_layout.setColumnStretch(5, 1)
+        source_layout.addWidget(export_button, 0, 3)
+        source_layout.addWidget(self.file_label, 1, 0, 1, 4)
+        source_layout.setColumnStretch(4, 1)
         root.addWidget(source)
 
         splitter = QSplitter()
@@ -950,45 +1113,13 @@ class ComposeTab(QWidget):
         QMessageBox.information(self, "名簿保存", f"名簿「{name}」を保存しました。")
 
     def open_recipient_list(self):
-        saved = self.storage.recipient_lists()
-        if not saved:
-            QMessageBox.information(self, "保存済み名簿", "保存済みの名簿はありません。")
+        dialog = RecipientListManagerDialog(self, self.storage)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.selected_list:
             return
-        labels = [
-            f"{item['name']}（{len(item['rows'])}件・{item['updated_at'].replace('T', ' ')}）"
-            for item in saved
-        ]
-        selected, ok = QInputDialog.getItem(
-            self, "保存済み名簿を開く", "名簿:", labels, 0, False)
-        if not ok:
-            return
-        item = saved[labels.index(selected)]
+        item = dialog.selected_list
         self.apply_recipient_data(
             item["source_name"], item["headers"], item["rows"],
             f"保存済み: {item['name']}")
-
-    def delete_recipient_list(self):
-        saved = self.storage.recipient_lists()
-        if not saved:
-            QMessageBox.information(self, "名簿削除", "保存済みの名簿はありません。")
-            return
-        labels = [f"{item['name']}（{len(item['rows'])}件）" for item in saved]
-        selected, ok = QInputDialog.getItem(
-            self, "保存済み名簿を削除", "削除する名簿:", labels, 0, False)
-        if not ok:
-            return
-        item = saved[labels.index(selected)]
-        answer = QMessageBox.question(
-            self, "名簿削除の確認",
-            f"名簿「{item['name']}」（{len(item['rows'])}件）を削除します。\n"
-            "この操作は元に戻せません。削除してよろしいですか？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self.storage.delete_recipient_list(item["id"])
-        QMessageBox.information(self, "名簿削除", f"名簿「{item['name']}」を削除しました。")
 
     def on_status_header_clicked(self, section: int):
         if section != 0 or not self.rows:
@@ -999,6 +1130,12 @@ class ComposeTab(QWidget):
 
     def render_table(self):
         self._updating_table = True
+        # 前回の ResizeToContents が残っていると setItem のたびに全行の列幅を
+        # 再計算し、2回目以降の読み込みで行数の2乗に比例して固まる。
+        # 流し込みの間だけ手動幅にして、最後に1回だけ内容に合わせる。
+        self.table.setUpdatesEnabled(False)
+        self.table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Interactive)
         self.table.setColumnCount(len(self.headers) + 1)
         self.table.setHorizontalHeaderLabels(["状態（送信対象）"] + self.headers)
         self.table.horizontalHeaderItem(0).setToolTip(
@@ -1019,6 +1156,7 @@ class ComposeTab(QWidget):
         self._updating_table = False
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setUpdatesEnabled(True)
         if self.rows:
             self.table.selectRow(0)
         self.refresh_validation()
@@ -1057,6 +1195,12 @@ class ComposeTab(QWidget):
         errors = {indices[index]: value for index, value in subset_errors.items()}
         self.validation_errors = errors
         self._updating_table = True
+        # セルの装飾を変えるたびに ResizeToContents が全行を再計算するため、
+        # 更新中だけ描画と自動列幅を止める（行数が多いと数秒固まる）。
+        header = self.table.horizontalHeader()
+        resize_mode = header.sectionResizeMode(0)
+        self.table.setUpdatesEnabled(False)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         for row_index in range(len(self.rows)):
             item = self.table.item(row_index, 0)
             if not item:
@@ -1085,6 +1229,8 @@ class ComposeTab(QWidget):
                 cell.setToolTip(tooltip)
                 cell.setBackground(QColor(base_color))
                 cell.setForeground(QColor("#1f2937"))
+        header.setSectionResizeMode(resize_mode)
+        self.table.setUpdatesEnabled(True)
         self._updating_table = False
         target_count = sum(1 for i in indices if i in self.included_rows)
         self.summary.setText(
