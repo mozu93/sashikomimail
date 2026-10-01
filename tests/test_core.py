@@ -6,8 +6,25 @@ from app.core import (
     carrier_domain_counts, export_recipient_file, guess_email_column,
     load_recipient_file, match_individual_attachments, normalize_search_text,
     render_template, split_addresses, typo_domain_suspects, unknown_tags,
-    sorted_row_order, validate_rows,
+    cyclic_neighbor, sorted_row_order, validate_rows,
 )
+
+
+def test_cyclic_neighbor_moves_and_wraps():
+    targets = [3, 10, 250]
+    assert cyclic_neighbor(targets, 3, True) == 10
+    assert cyclic_neighbor(targets, 4, True) == 10
+    assert cyclic_neighbor(targets, 250, True) == 3      # 末尾から先頭へ
+    assert cyclic_neighbor(targets, 10, False) == 3
+    assert cyclic_neighbor(targets, 3, False) == 250     # 先頭から末尾へ
+    assert cyclic_neighbor(targets, -1, True) == 3       # 未選択
+    assert cyclic_neighbor(targets, -1, False) == 250
+
+
+def test_cyclic_neighbor_single_and_empty():
+    assert cyclic_neighbor([7], 7, True) == 7
+    assert cyclic_neighbor([7], 7, False) == 7
+    assert cyclic_neighbor([], 0, True) is None
 
 
 def _names(rows, order):

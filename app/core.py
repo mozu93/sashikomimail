@@ -326,6 +326,19 @@ def normalize_search_text(value: object) -> str:
     )
 
 
+def cyclic_neighbor(targets: list[int], current: int, forward: bool) -> int | None:
+    """昇順の targets のうち、current の次（forward=False なら前）を返す。
+
+    端まで行ったら反対側の端へ戻る。current が targets に含まれなくてもよい
+    （未選択は -1）。targets が空なら None。
+    """
+    if not targets:
+        return None
+    if forward:
+        return next((t for t in targets if t > current), targets[0])
+    return next((t for t in reversed(targets) if t < current), targets[-1])
+
+
 def sorted_row_order(rows: list[dict[str, str]], column: str,
                      descending: bool = False) -> list[int]:
     """column の値で並べた行の添字を返す（元の添字の並び）。

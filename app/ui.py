@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.core import (
-    carrier_domain_counts, export_recipient_file, guess_email_column,
+    carrier_domain_counts, cyclic_neighbor, export_recipient_file, guess_email_column,
     is_valid_email, load_recipient_file, match_individual_attachments,
     normalize_search_text, render_template, sorted_row_order, split_addresses,
     typo_domain_suspects, unknown_tags, validate_rows,
@@ -770,7 +770,23 @@ class ComposeTab(QWidget):
         self.table.horizontalHeader().sectionClicked.connect(self.on_status_header_clicked)
         preview_layout.addLayout(search_row)
         preview_layout.addLayout(filter_row)
+        self.prev_error_button = QPushButton("◀ 前のエラー")
+        self.next_error_button = QPushButton("次のエラー ▶")
+        for button, forward in ((self.prev_error_button, False),
+                                (self.next_error_button, True)):
+            button.setToolTip(
+                "未確認のエラー行へ移動します（確認済みの行は飛ばします）")
+            button.setEnabled(False)
+            button.clicked.connect(
+                lambda _checked=False, f=forward: self.jump_to_error(f))
+        self.error_position_label = QLabel("")
+        error_nav_row = QHBoxLayout()
+        error_nav_row.addWidget(self.prev_error_button)
+        error_nav_row.addWidget(self.next_error_button)
+        error_nav_row.addWidget(self.error_position_label)
+        error_nav_row.addStretch(1)
         preview_layout.addWidget(self.summary)
+        preview_layout.addLayout(error_nav_row)
         preview_layout.addWidget(self.active_filter_label)
         preview_layout.addWidget(self.table)
         left_layout.addWidget(preview_box)
@@ -1237,6 +1253,8 @@ class ComposeTab(QWidget):
             )
             self.summary.setText(
                 f"表示 0件 / 送信対象 0件 / 全{len(self.rows)}件{hint}")
+            self.validation_errors = {}
+            self.update_error_navigation()
             return
         indices = self.filtered_indices or []
         target_rows = [self.rows[index] for index in indices]
@@ -1290,6 +1308,33 @@ class ComposeTab(QWidget):
             f"{sum(self.approved_validation_issues.get(i) != tuple(v) for i, v in errors.items())}件"
             f" / 確認済み "
             f"{sum(self.approved_validation_issues.get(i) == tuple(v) for i, v in errors.items())}件）")
+        self.update_error_navigation()
+
+    def unconfirmed_error_rows(self) -> list[int]:
+        """表示中で、まだ確認していないエラー行の添字（昇順）。"""
+        return [
+            index for index in sorted(self.validation_errors)
+            if self.approved_validation_issues.get(index)
+            != tuple(self.validation_errors[index])
+        ]
+
+    def update_error_navigation(self):
+        has_errors = bool(self.unconfirmed_error_rows())
+        self.prev_error_button.setEnabled(has_errors)
+        self.next_error_button.setEnabled(has_errors)
+        self.error_position_label.setText("")
+
+    def jump_to_error(self, forward: bool):
+        targets = self.unconfirmed_error_rows()
+        target = cyclic_neighbor(targets, self.table.currentRow(), forward)
+        if target is None:
+            return
+        self.table.selectRow(target)
+        self.table.setCurrentCell(target, 0)
+        self.table.scrollToItem(
+            self.table.item(target, 0), QAbstractItemView.ScrollHint.PositionAtCenter)
+        self.error_position_label.setText(
+            f"未確認エラー {targets.index(target) + 1} / {len(targets)}")
 
     def on_validation_columns_changed(self, _text: str = ""):
         self.approved_validation_issues.clear()
