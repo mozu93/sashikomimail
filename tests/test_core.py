@@ -6,8 +6,30 @@ from app.core import (
     carrier_domain_counts, export_recipient_file, guess_email_column,
     load_recipient_file, match_individual_attachments, normalize_search_text,
     render_template, split_addresses, typo_domain_suspects, unknown_tags,
-    validate_rows,
+    sorted_row_order, validate_rows,
 )
+
+
+def _names(rows, order):
+    return [rows[i]["名"] for i in order]
+
+
+def test_sorted_row_order_text_ascending_and_descending():
+    rows = [{"名": "b"}, {"名": "A"}, {"名": "ｃ"}]
+    # 大文字小文字・全角半角を区別せず並べる
+    assert _names(rows, sorted_row_order(rows, "名", False)) == ["A", "b", "ｃ"]
+    assert _names(rows, sorted_row_order(rows, "名", True)) == ["ｃ", "b", "A"]
+
+
+def test_sorted_row_order_numbers_compare_as_numbers():
+    rows = [{"名": "10"}, {"名": "9"}, {"名": "１００"}]
+    assert _names(rows, sorted_row_order(rows, "名", False)) == ["9", "10", "１００"]
+
+
+def test_sorted_row_order_empty_values_always_last_and_stable():
+    rows = [{"名": ""}, {"名": "b"}, {"名": " "}, {"名": "a"}]
+    assert sorted_row_order(rows, "名", False) == [3, 1, 0, 2]
+    assert sorted_row_order(rows, "名", True) == [1, 3, 0, 2]
 
 
 def test_load_xlsx_and_normalize(tmp_path: Path):

@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 from app.core import (
     carrier_domain_counts, export_recipient_file, guess_email_column,
     is_valid_email, load_recipient_file, match_individual_attachments,
-    normalize_search_text, render_template, split_addresses,
+    normalize_search_text, render_template, sorted_row_order, split_addresses,
     typo_domain_suspects, unknown_tags, validate_rows,
 )
 from app.gmail_smtp import GMAIL_ATTACHMENT_LIMIT, open_gmail_connection, send_mail_gmail
@@ -673,6 +673,9 @@ class ComposeTab(QWidget):
         self.filtered_indices: list[int] = []
         self.filter_indices: list[int] = []
         self.included_rows: set[int] = set()
+        # ヘッダークリックの並べ替え。row_origin[i] は現在 i 行目の取り込み時の位置。
+        self.row_origin: list[int] = []
+        self.sort_state: tuple[str, bool] | None = None
         self.active_filter_desc: str = ""
         self.source_path = ""
         self.recipient_display_name = ""
@@ -1069,6 +1072,9 @@ class ComposeTab(QWidget):
         self.filtered_indices = list(range(len(rows)))
         self.filter_indices = list(range(len(rows)))
         self.included_rows = set(range(len(rows)))
+        self.row_origin = list(range(len(rows)))
+        self.sort_state = None
+        self.table.horizontalHeader().setSortIndicatorShown(False)
         self.active_filter_desc = ""
         source_name = display_name or Path(source_path).name
         self.recipient_display_name = source_name
@@ -1122,11 +1128,52 @@ class ComposeTab(QWidget):
             f"保存済み: {item['name']}")
 
     def on_status_header_clicked(self, section: int):
-        if section != 0 or not self.rows:
+        if not self.rows:
+            return
+        if section != 0:
+            self.sort_by_header(section)
             return
         all_included = len(self.included_rows) == len(self.rows)
         self.included_rows = set() if all_included else set(range(len(self.rows)))
         self.refresh_validation()
+
+    def sort_by_header(self, section: int):
+        """見出しクリックで並べ替える。昇順→降順→取り込み順の順に切り替わる。
+
+        送信対象・確認済み・個別添付・絞り込み結果は行番号で持っているため、
+        並べ替えた順序に合わせて付け替える（同じ人の行に付いて回る）。
+        """
+        if section - 1 >= len(self.headers):
+            return
+        column = self.headers[section - 1]
+        if self.sort_state is None or self.sort_state[0] != column:
+            new_state: tuple[str, bool] | None = (column, False)
+        elif not self.sort_state[1]:
+            new_state = (column, True)
+        else:
+            new_state = None
+        if new_state is None:
+            order = sorted(range(len(self.rows)), key=self.row_origin.__getitem__)
+        else:
+            order = sorted_row_order(self.rows, column, new_state[1])
+        new_index = {old: new for new, old in enumerate(order)}
+        self.rows = [self.rows[old] for old in order]
+        self.row_origin = [self.row_origin[old] for old in order]
+        self.included_rows = {new_index[i] for i in self.included_rows}
+        self.approved_validation_issues = {
+            new_index[i]: issues for i, issues in self.approved_validation_issues.items()}
+        self.individual_attachments = {
+            new_index[i]: paths for i, paths in self.individual_attachments.items()}
+        self.filter_indices = sorted(new_index[i] for i in self.filter_indices)
+        self.sort_state = new_state
+        self.render_table()
+        header = self.table.horizontalHeader()
+        header.setSortIndicatorShown(new_state is not None)
+        if new_state is not None:
+            header.setSortIndicator(
+                section, Qt.SortOrder.DescendingOrder if new_state[1]
+                else Qt.SortOrder.AscendingOrder)
+        self.update_visible_rows()
 
     def render_table(self):
         self._updating_table = True
@@ -1319,6 +1366,7 @@ class ComposeTab(QWidget):
                 QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
             return
         self.rows.pop(row_index)
+        self.row_origin.pop(row_index)
         self.approved_validation_issues.clear()
         self.validation_errors.clear()
         self.filter_indices = list(range(len(self.rows)))

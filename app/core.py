@@ -324,3 +324,31 @@ def normalize_search_text(value: object) -> str:
         chr(ord(char) + 0x60) if "ぁ" <= char <= "ゖ" else char
         for char in normalized
     )
+
+
+def sorted_row_order(rows: list[dict[str, str]], column: str,
+                     descending: bool = False) -> list[int]:
+    """column の値で並べた行の添字を返す（元の添字の並び）。
+
+    列の空でない値がすべて数値なら数値順、それ以外は正規化した文字列順。
+    空欄は昇順・降順どちらでも末尾に置き、同値は元の順序を保つ。
+    """
+    values = [str(row.get(column, "")).strip() for row in rows]
+    filled = [i for i, value in enumerate(values) if value]
+    empty = [i for i, value in enumerate(values) if not value]
+
+    def as_number(value: str) -> float | None:
+        try:
+            return float(unicodedata.normalize("NFKC", value).replace(",", ""))
+        except ValueError:
+            return None
+
+    numbers = {i: as_number(values[i]) for i in filled}
+    if filled and all(number is not None for number in numbers.values()):
+        def key(i: int):
+            return numbers[i]
+    else:
+        def key(i: int):
+            return normalize_search_text(values[i])
+    # reverse=True でも sorted は安定ソートのため、同値は元の順序のまま残る。
+    return sorted(filled, key=key, reverse=descending) + empty
