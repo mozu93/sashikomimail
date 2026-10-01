@@ -150,6 +150,112 @@ def split_addresses(value: str) -> list[str]:
     return [item.strip() for item in re.split(r"[,;\n]", value or "") if item.strip()]
 
 
+def parse_pasted_recipients(text: str) -> list[tuple[str, str]]:
+    """貼り付けたテキストを (氏名, アドレス) の組へ分解する。
+
+    区切りは改行・カンマ・セミコロン・読点（全角を含む）。引用符や <> の中の
+    区切り文字では分割しない。「氏名 <addr>」「addr」「氏名 addr」に対応する。
+    アドレスとして不正な断片も捨てず、表の検証でエラーとして見せる。
+    """
+    chunks, buffer, quote, angle = [], [], False, False
+    for char in text or "":
+        if char == '"':
+            quote = not quote
+        elif not quote and char == "<":
+            angle = True
+        elif not quote and char == ">":
+            angle = False
+        if char in ",;、；，\n\r" and not quote and not angle:
+            chunks.append("".join(buffer))
+            buffer = []
+        else:
+            buffer.append(char)
+    chunks.append("".join(buffer))
+
+    result = []
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        bracket = re.search(r"<([^<>]*)>", chunk)
+        if bracket:
+            name = chunk[:bracket.start()].strip().strip('"').strip()
+            email = bracket.group(1).strip()
+        else:
+            tokens = chunk.split()
+            at_tokens = [token for token in tokens if "@" in token]
+            if len(tokens) > 1 and len(at_tokens) == 1:
+                email = at_tokens[0]
+                name = " ".join(token for token in tokens if "@" not in token)
+            else:
+                name, email = "", chunk
+        email = re.sub(r"^mailto:", "", email, flags=re.IGNORECASE).strip()
+        if email:
+            result.append((name, email))
+    return result
+
+
+def is_table_paste(text: str) -> bool:
+    """Excel のセルを貼り付けたもの（タブ区切り）かどうか。"""
+    return "\t" in (text or "")
+
+
+def parse_pasted_table(
+        text: str) -> tuple[list[str], list[dict[str, str]], list[str]]:
+    """Excel のセルを貼り付けたテキストから、見出しと行を作る。
+
+    先頭の空でない行を見出しとして扱い、その列名で名簿の列を作る。
+    先頭行にアドレス（@）があれば見出しが無いとみなし ValueError とする。
+    空の見出しは「列N」、重複した見出しは「名前2」の形にして区別する。
+    戻り値は (見出し, 行, 利用者へ伝える注意)。
+    """
+    lines = [line for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("貼り付けるデータがありません。")
+    header_cells = [cell.strip() for cell in lines[0].split("\t")]
+    if any("@" in cell for cell in header_cells):
+        raise ValueError(
+            "先頭行が見出しではなくデータのようです。"
+            "Excelで見出し行も一緒にコピーして貼り付けてください。")
+    while header_cells and not header_cells[-1]:
+        header_cells.pop()          # コピー範囲の右端に付く空セルは無視する
+    headers: list[str] = []
+    for position, name in enumerate(header_cells, 1):
+        name = name or f"列{position}"
+        candidate, number = name, 1
+        while candidate in headers:
+            number += 1
+            candidate = f"{name}{number}"
+        headers.append(candidate)
+
+    rows, ignored = [], 0
+    for line in lines[1:]:
+        cells = [cell.strip() for cell in line.split("\t")]
+        row = {header: "" for header in headers}
+        for header, cell in zip(headers, cells):
+            row[header] = cell
+        ignored += sum(1 for cell in cells[len(headers):] if cell)
+        rows.append(row)
+    notes = [f"列の数を超えたセル{ignored}個を無視します。"] if ignored else []
+    return headers, rows, notes
+
+
+def parse_pasted_rows(text: str, headers: list[str], email_column: str,
+                      name_column: str = "氏名") -> list[dict[str, str]]:
+    """アドレスの貼り付け（Excel以外）を、名簿の行へ変換する。
+
+    アドレスは email_column へ、氏名があり name_column が名簿にあればそこへ入れる。
+    """
+    rows = []
+    for name, email in parse_pasted_recipients(text):
+        row = {header: "" for header in headers}
+        row[email_column] = email
+        if name and name_column in row and name_column != email_column:
+            row[name_column] = name
+        rows.append(row)
+    return rows
+
+
 def is_valid_email(value: str) -> bool:
     return bool(EMAIL_RE.fullmatch(value.strip()))
 

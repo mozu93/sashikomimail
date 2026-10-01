@@ -19,7 +19,8 @@ from PyQt6.QtWidgets import (
 from app.core import (
     carrier_domain_counts, cyclic_neighbor, export_recipient_file, guess_email_column,
     is_valid_email, load_recipient_file, match_individual_attachments,
-    normalize_search_text, render_template, sorted_row_order, split_addresses,
+    is_table_paste, normalize_search_text, parse_pasted_rows, parse_pasted_table,
+    render_template, sorted_row_order, split_addresses,
     typo_domain_suspects, unknown_tags, validate_rows,
 )
 from app.gmail_smtp import GMAIL_ATTACHMENT_LIMIT, open_gmail_connection, send_mail_gmail
@@ -37,6 +38,9 @@ from app.version import __version__
 # 選ぶため、この項目を先頭に置いて「列を選んでいない」状態を表現する。
 # これが無いと推測に失敗したとき先頭列（「№」等）が黙って宛先になる。
 TO_COLUMN_PLACEHOLDER = "— 列を選択してください —"
+
+# 「新規名簿を作成」で作る名簿の列。
+NEW_LIST_HEADERS = ["事業所名", "役職名", "氏名", "メールアドレス"]
 
 # 背景色を指定した箇所には必ず文字色も指定する。
 # 文字色を省略するとOSのダークモード時にパレット由来の白文字が使われ、
@@ -561,6 +565,89 @@ class RecipientListManagerDialog(QDialog):
         self.reload()
 
 
+class PasteRecipientsDialog(QDialog):
+    def __init__(self, parent, headers: list[str], email_column: str,
+                 replaces_existing: bool = False):
+        super().__init__(parent)
+        self.headers = headers
+        self.email_column = email_column
+        self.replaces_existing = replaces_existing
+        # "table": Excelのセル（見出しから新しい名簿を作る） / "rows": アドレスの追加
+        self.mode: str | None = None
+        self.new_headers: list[str] = []
+        self.rows: list[dict[str, str]] = []
+        self.setWindowTitle("宛先を貼り付け")
+        self.resize(520, 360)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "メールアドレス、またはExcelのセルをコピーして貼り付けてください。\n"
+            "・アドレスは改行・カンマ・セミコロン区切り、「氏名 <アドレス>」にも対応。"
+            "現在の名簿へ追加します\n"
+            "・Excelは見出し行も含めてコピーしてください。見出しから新しい名簿を作ります"))
+        self.text = QPlainTextEdit()
+        self.text.setPlaceholderText(
+            "例:\n山田 太郎 <taro@example.jp>\nhanako@example.jp; jiro@example.jp\n"
+            "（Excelは見出し行を含めて、そのまま貼り付けます）")
+        self.text.textChanged.connect(self.update_state)
+        layout.addWidget(self.text, 1)
+        self.count_label = QLabel("")
+        layout.addWidget(self.count_label)
+        buttons = QHBoxLayout()
+        self.ok_button = QPushButton("追加")
+        self.ok_button.setObjectName("primary")
+        self.ok_button.clicked.connect(self.accept)
+        cancel = QPushButton("キャンセル")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(self.ok_button)
+        buttons.addWidget(cancel)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        self.update_state()
+
+    def update_state(self):
+        text = self.text.toPlainText()
+        self.mode, self.new_headers, self.rows = None, [], []
+        lines: list[str] = []
+        if not text.strip():
+            pass
+        elif is_table_paste(text):
+            try:
+                headers, rows, notes = parse_pasted_table(text)
+            except ValueError as exc:
+                lines.append(str(exc))
+            else:
+                self.mode, self.new_headers, self.rows = "table", headers, rows
+                lines.append(f"見出し: {' / '.join(headers)}")
+                lines.append(f"{len(rows)}件の名簿を新しく作成します" + (
+                    "（現在の名簿は置き換えられます）" if self.replaces_existing else ""))
+                lines.extend(notes)
+                email_column = guess_email_column(headers, rows)
+                if not email_column:
+                    lines.append(
+                        "メールアドレスの列を判別できません。作成後に「To列」で選んでください。")
+                else:
+                    invalid = sum(1 for row in rows
+                                  if not is_valid_email(row.get(email_column, "")))
+                    if invalid:
+                        lines.append(
+                            f"「{email_column}」の形式が正しくない行 {invalid}件"
+                            "（作成後に表でエラー表示されます）")
+        elif not self.email_column:
+            lines.append("先に「To列」でメールアドレスの列を選んでください。")
+        else:
+            rows = parse_pasted_rows(text, self.headers, self.email_column)
+            if rows:
+                self.mode, self.rows = "rows", rows
+                invalid = sum(1 for row in rows
+                              if not is_valid_email(row.get(self.email_column, "")))
+                lines.append(f"{len(rows)}件を追加します" + (
+                    f"（「{self.email_column}」の形式が正しくない行 {invalid}件。"
+                    "追加後に表でエラー表示されます）" if invalid else ""))
+        self.count_label.setText("\n".join(lines))
+        self.ok_button.setText("名簿を作成" if self.mode == "table" else "追加")
+        self.ok_button.setEnabled(self.mode is not None)
+
+
 class UpdateBanner(QWidget):
     update_found = pyqtSignal(dict)
     download_progress = pyqtSignal(int, int)
@@ -709,7 +796,16 @@ class ComposeTab(QWidget):
         source_layout.addWidget(open_list, 0, 1)
         source_layout.addWidget(save_list, 0, 2)
         source_layout.addWidget(export_button, 0, 3)
-        source_layout.addWidget(self.file_label, 1, 0, 1, 4)
+        new_list = QPushButton("新規名簿を作成")
+        new_list.setToolTip(
+            "Excel・CSVを使わず、事業所名・役職名・氏名・メールアドレスの空の名簿を作ります")
+        new_list.clicked.connect(self.create_new_recipient_list)
+        paste_button = QPushButton("宛先を貼り付け")
+        paste_button.setToolTip("メールアドレスを貼り付けて、名簿に行として追加します")
+        paste_button.clicked.connect(self.paste_recipients)
+        source_layout.addWidget(new_list, 1, 0)
+        source_layout.addWidget(paste_button, 1, 1)
+        source_layout.addWidget(self.file_label, 2, 0, 1, 4)
         source_layout.setColumnStretch(4, 1)
         root.addWidget(source)
 
@@ -743,8 +839,12 @@ class ComposeTab(QWidget):
         add_row_button = QPushButton("行を追加")
         add_row_button.setToolTip("名簿の末尾に空の行を追加し、そのまま入力できます")
         add_row_button.clicked.connect(self.add_row)
-        delete_row_button = QPushButton("選択行を削除")
+        self.delete_row_button = delete_row_button = QPushButton("選択行を削除")
         delete_row_button.setObjectName("danger")
+        delete_row_button.setToolTip(
+            "表で青く選択した行を削除します（Ctrl・Shift+クリックで複数選択）。\n"
+            "状態列の送信対象チェックとは別の操作です。")
+        delete_row_button.setEnabled(False)
         delete_row_button.clicked.connect(self.delete_selected_row)
         approve_error_button = QPushButton("選択行のエラーを確認・有効化")
         approve_error_button.setToolTip(
@@ -765,7 +865,8 @@ class ComposeTab(QWidget):
             | QAbstractItemView.EditTrigger.EditKeyPressed
             | QAbstractItemView.EditTrigger.SelectedClicked)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.itemSelectionChanged.connect(self.update_delete_button)
         self.table.itemChanged.connect(self.on_table_item_changed)
         self.table.horizontalHeader().sectionClicked.connect(self.on_status_header_clicked)
         preview_layout.addLayout(search_row)
@@ -1207,7 +1308,9 @@ class ComposeTab(QWidget):
         self.table.setHorizontalHeaderLabels(["状態（送信対象）"] + self.headers)
         self.table.horizontalHeaderItem(0).setToolTip(
             "チェックを外した行は送信対象から除外されます。\n"
-            "見出しをクリックすると全行のチェックを一括切替できます。")
+            "見出しをクリックすると全行のチェックを一括切替できます。\n"
+            "※このチェックは削除の対象ではありません。"
+            "削除は行を選択して「選択行を削除」を押します。")
         self.table.setRowCount(len(self.rows))
         for r, row in enumerate(self.rows):
             status_item = QTableWidgetItem("")
@@ -1401,52 +1504,120 @@ class ComposeTab(QWidget):
         else:
             self.refresh_validation()
 
-    def add_row(self):
-        if not self.headers:
-            QMessageBox.information(
-                self, "行の追加", "先にExcel・CSVまたは保存済み名簿を読み込んでください。")
-            return
+    def append_rows(self, new_rows: list[dict[str, str]]) -> int:
+        """名簿の末尾へ行を追加し、最初に追加した行の添字を返す。"""
         # 追加した行が絞り込み・検索で隠れないよう、先に条件を解除する。
         self.clear_filter()
         self.search_value.clear()
-        index = len(self.rows)
-        self.rows.append({header: "" for header in self.headers})
-        self.row_origin.append(max(self.row_origin, default=-1) + 1)
-        self.included_rows.add(index)
+        first_index = len(self.rows)
+        for row in new_rows:
+            index = len(self.rows)
+            self.rows.append(row)
+            self.row_origin.append(max(self.row_origin, default=-1) + 1)
+            self.included_rows.add(index)
         self.filter_indices = list(range(len(self.rows)))
         self.file_label.setText(
             f"{self.recipient_display_name}（{len(self.rows)}件）")
         self.render_table()
         self.update_visible_rows()
+        return first_index
+
+    def create_new_recipient_list(self):
+        if self.rows and QMessageBox.question(
+                self, "新規名簿の作成",
+                "現在の名簿を閉じて、空の新規名簿を作成します。\n"
+                "保存していない内容は失われます。よろしいですか？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self.apply_recipient_data("新規名簿", list(NEW_LIST_HEADERS), [], "新規名簿")
+
+    def paste_recipients(self):
+        if self.headers:
+            headers = list(self.headers)
+            email_column = self.selected_to_column() or guess_email_column(
+                self.headers, self.rows)
+        else:
+            headers, email_column = list(NEW_LIST_HEADERS), "メールアドレス"
+        dialog = PasteRecipientsDialog(
+            self, headers, email_column, replaces_existing=bool(self.rows))
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.mode:
+            return
+        if dialog.mode == "table":
+            # Excelの貼り付け: 見出しから新しい名簿を作り、現在の名簿を置き換える。
+            if self.rows and QMessageBox.question(
+                    self, "名簿の置き換え",
+                    "貼り付けたデータの見出しで新しい名簿を作成し、"
+                    "現在の名簿を閉じます。\n"
+                    "保存していない内容は失われます。よろしいですか？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
+            self.apply_recipient_data(
+                "貼り付けデータ", dialog.new_headers, dialog.rows, "貼り付けデータ")
+            return
+        if not self.headers:
+            self.apply_recipient_data("新規名簿", list(NEW_LIST_HEADERS), [], "新規名簿")
+        first_index = self.append_rows(dialog.rows)
+        self.table.selectRow(first_index)
+        self.table.scrollToItem(self.table.item(first_index, 0))
+
+    def add_row(self):
+        if not self.headers:
+            QMessageBox.information(
+                self, "行の追加", "先にExcel・CSVまたは保存済み名簿を読み込むか、"
+                "「新規名簿を作成」を押してください。")
+            return
+        index = self.append_rows([{header: "" for header in self.headers}])
         self.table.selectRow(index)
         edit_item = self.table.item(index, 1)
         self.table.scrollToItem(edit_item)
         self.table.setCurrentItem(edit_item)
         self.table.editItem(edit_item)
 
+    def selected_row_indices(self) -> list[int]:
+        """表で選択されている（青く反転している）行の添字。状態列のチェックとは別。"""
+        rows = {index.row() for index in self.table.selectionModel().selectedRows()}
+        return sorted(row for row in rows if 0 <= row < len(self.rows))
+
+    def update_delete_button(self):
+        count = len(self.selected_row_indices())
+        self.delete_row_button.setEnabled(count > 0)
+        self.delete_row_button.setText(
+            f"選択した{count}行を削除" if count else "選択行を削除")
+
     def delete_selected_row(self):
-        row_index = self.table.currentRow()
-        if row_index < 0 or row_index >= len(self.rows):
-            QMessageBox.information(self, "行の削除", "削除する行を選択してください。")
+        targets = self.selected_row_indices()
+        if not targets:
+            QMessageBox.information(
+                self, "行の削除",
+                "削除する行を選択してください。\n"
+                "（Ctrl・Shiftを押しながらクリックすると複数行を選べます）")
             return
-        preview = " / ".join(
-            value for value in self.rows[row_index].values() if value)[:100]
+        lines = [
+            "・" + (" / ".join(v for v in self.rows[i].values() if v)[:60] or "（空の行）")
+            for i in targets[:5]]
+        if len(targets) > 5:
+            lines.append(f"…ほか{len(targets) - 5}行")
         if QMessageBox.question(
                 self, "行の削除",
-                f"選択した行を名簿から削除しますか？\n\n{preview}",
+                f"青く選択されている{len(targets)}行を名簿から削除します。\n"
+                "（状態列の送信対象チェックとは関係ありません）\n\n"
+                + "\n".join(lines) + "\n\nよろしいですか？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
             return
-        self.rows.pop(row_index)
-        self.row_origin.pop(row_index)
+        removed = set(targets)
+        # 削除した行より後ろの添字は、削除した行数だけ前へ詰める。
+        shift = {i: i - sum(1 for r in targets if r < i)
+                 for i in range(len(self.rows)) if i not in removed}
+        self.rows = [row for i, row in enumerate(self.rows) if i not in removed]
+        self.row_origin = [o for i, o in enumerate(self.row_origin) if i not in removed]
         self.approved_validation_issues.clear()
         self.validation_errors.clear()
         self.filter_indices = list(range(len(self.rows)))
         self.filtered_indices = list(range(len(self.rows)))
-        self.included_rows = {
-            i if i < row_index else i - 1
-            for i in self.included_rows if i != row_index
-        }
+        self.included_rows = {shift[i] for i in self.included_rows if i in shift}
         self.file_label.setText(
             f"{self.recipient_display_name}（{len(self.rows)}件）")
         self.clear_individual_attachments()

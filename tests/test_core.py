@@ -1,13 +1,104 @@
 from pathlib import Path
 
+import pytest
 from openpyxl import Workbook, load_workbook
 
 from app.core import (
     carrier_domain_counts, export_recipient_file, guess_email_column,
     load_recipient_file, match_individual_attachments, normalize_search_text,
     render_template, split_addresses, typo_domain_suspects, unknown_tags,
-    cyclic_neighbor, sorted_row_order, validate_rows,
+    cyclic_neighbor, is_table_paste, parse_pasted_recipients, parse_pasted_rows,
+    parse_pasted_table, sorted_row_order, validate_rows,
 )
+
+HEADERS = ["事業所名", "役職名", "氏名", "メールアドレス"]
+
+
+def test_parse_pasted_table_builds_headers_and_rows_from_first_line():
+    headers, rows, notes = parse_pasted_table(
+        "事業所名\t役職名\t氏名\tメールアドレス\n"
+        "A社\t部長\t山田 太郎\ttaro@example.jp\n"
+        "B社\t\t鈴木\thanako@example.jp")
+    assert headers == HEADERS
+    assert rows == [
+        {"事業所名": "A社", "役職名": "部長", "氏名": "山田 太郎",
+         "メールアドレス": "taro@example.jp"},
+        {"事業所名": "B社", "役職名": "", "氏名": "鈴木",
+         "メールアドレス": "hanako@example.jp"},
+    ]
+    assert notes == []
+
+
+def test_parse_pasted_table_without_header_is_rejected():
+    # 先頭行がアドレスを含むなら見出しが無いとみなし、追加せず案内する。
+    with pytest.raises(ValueError, match="見出し"):
+        parse_pasted_table("A社\t部長\t山田\ttaro@example.jp")
+
+
+def test_parse_pasted_table_fixes_blank_and_duplicate_headers():
+    headers, rows, _ = parse_pasted_table("名前\t\t名前\t\nA\tB\tC\t")
+    assert headers == ["名前", "列2", "名前2"]   # 末尾の空見出しは捨てる
+    assert rows == [{"名前": "A", "列2": "B", "名前2": "C"}]
+
+
+def test_parse_pasted_table_cell_count_mismatch():
+    headers, rows, notes = parse_pasted_table("a\tb\nx\ny\tz\textra")
+    assert rows == [{"a": "x", "b": ""}, {"a": "y", "b": "z"}]
+    assert any("無視" in note for note in notes)
+
+
+def test_parse_pasted_table_skips_blank_lines_and_header_only():
+    headers, rows, _ = parse_pasted_table("a\tb\n\n  \n1\t2\n")
+    assert rows == [{"a": "1", "b": "2"}]
+    assert parse_pasted_table("a\tb") == (["a", "b"], [], [])
+
+
+def test_is_table_paste_detects_tab_only():
+    assert is_table_paste("a\tb")
+    assert not is_table_paste("a@example.jp, b@example.jp")
+
+
+def test_parse_pasted_rows_maps_addresses_into_given_columns():
+    rows = parse_pasted_rows("山田 <a@example.jp>; b@example.jp", HEADERS, "メールアドレス")
+    assert rows == [
+        {"事業所名": "", "役職名": "", "氏名": "山田", "メールアドレス": "a@example.jp"},
+        {"事業所名": "", "役職名": "", "氏名": "", "メールアドレス": "b@example.jp"},
+    ]
+
+
+def test_parse_pasted_rows_without_name_column_keeps_address_only():
+    rows = parse_pasted_rows("田中 <t@example.jp>", ["社名", "Mail"], "Mail")
+    assert rows == [{"社名": "", "Mail": "t@example.jp"}]
+    assert parse_pasted_rows("\n  \n", HEADERS, "メールアドレス") == []
+
+
+def test_parse_pasted_recipients_plain_addresses_any_separator():
+    text = "a@example.jp, b@example.jp;c@example.jp\nd@example.jp\n\n  "
+    assert parse_pasted_recipients(text) == [
+        ("", "a@example.jp"), ("", "b@example.jp"),
+        ("", "c@example.jp"), ("", "d@example.jp")]
+
+
+def test_parse_pasted_recipients_name_and_angle_bracket_forms():
+    text = '山田 太郎 <taro@example.jp>; "鈴木, 花子" <hanako@example.jp>\n<x@example.jp>'
+    assert parse_pasted_recipients(text) == [
+        ("山田 太郎", "taro@example.jp"),
+        ("鈴木, 花子", "hanako@example.jp"),
+        ("", "x@example.jp")]
+
+
+def test_parse_pasted_recipients_fullwidth_separators_and_name_before_address():
+    text = "a@example.jp、b@example.jp；c@example.jp，山田 d@example.jp"
+    assert parse_pasted_recipients(text) == [
+        ("", "a@example.jp"), ("", "b@example.jp"),
+        ("", "c@example.jp"), ("山田", "d@example.jp")]
+
+
+def test_parse_pasted_recipients_keeps_invalid_chunks_for_later_validation():
+    # アドレスとして不正でも捨てず、表の検証でエラー表示させる。
+    assert parse_pasted_recipients("not-an-address\nmailto:m@example.jp") == [
+        ("", "not-an-address"), ("", "m@example.jp")]
+    assert parse_pasted_recipients("") == []
 
 
 def test_cyclic_neighbor_moves_and_wraps():
