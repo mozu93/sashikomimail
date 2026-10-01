@@ -8,7 +8,7 @@ from app.core import (
     load_recipient_file, match_individual_attachments, normalize_search_text,
     render_template, split_addresses, typo_domain_suspects, unknown_tags,
     cyclic_neighbor, is_table_paste, parse_pasted_recipients, parse_pasted_rows,
-    parse_pasted_table, sorted_row_order, validate_rows,
+    parse_pasted_table, sorted_row_order, validate_new_column_name, validate_rows,
 )
 
 HEADERS = ["事業所名", "役職名", "氏名", "メールアドレス"]
@@ -51,6 +51,23 @@ def test_parse_pasted_table_skips_blank_lines_and_header_only():
     headers, rows, _ = parse_pasted_table("a\tb\n\n  \n1\t2\n")
     assert rows == [{"a": "1", "b": "2"}]
     assert parse_pasted_table("a\tb") == (["a", "b"], [], [])
+
+
+def test_validate_new_column_name_accepts_normal_names():
+    assert validate_new_column_name("部署名", HEADERS) is None
+    assert validate_new_column_name("  備考 ", HEADERS) is None   # 前後の空白は無視
+
+
+def test_validate_new_column_name_rejects_blank_and_duplicate():
+    assert "入力" in validate_new_column_name("   ", HEADERS)
+    assert "既に" in validate_new_column_name("氏名", HEADERS)
+    assert "既に" in validate_new_column_name(" 氏名 ", HEADERS)
+
+
+def test_validate_new_column_name_rejects_template_syntax_characters():
+    # { } | は差し込みタグの書式で、列名に含めるとタグとして解釈できなくなる。
+    for name in ("a{b", "a}b", "a|b"):
+        assert "使えません" in validate_new_column_name(name, HEADERS)
 
 
 def test_is_table_paste_detects_tab_only():

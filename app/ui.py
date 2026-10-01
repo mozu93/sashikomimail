@@ -20,7 +20,7 @@ from app.core import (
     carrier_domain_counts, cyclic_neighbor, export_recipient_file, guess_email_column,
     is_valid_email, load_recipient_file, match_individual_attachments,
     is_table_paste, normalize_search_text, parse_pasted_rows, parse_pasted_table,
-    render_template, sorted_row_order, split_addresses,
+    render_template, sorted_row_order, validate_new_column_name, split_addresses,
     typo_domain_suspects, unknown_tags, validate_rows,
 )
 from app.gmail_smtp import GMAIL_ATTACHMENT_LIMIT, open_gmail_connection, send_mail_gmail
@@ -839,6 +839,10 @@ class ComposeTab(QWidget):
         add_row_button = QPushButton("行を追加")
         add_row_button.setToolTip("名簿の末尾に空の行を追加し、そのまま入力できます")
         add_row_button.clicked.connect(self.add_row)
+        add_column_button = QPushButton("列を追加")
+        add_column_button.setToolTip(
+            "名簿の右端に空の列を追加します（差し込みタグ {列名} としても使えます）")
+        add_column_button.clicked.connect(self.add_column)
         self.delete_row_button = delete_row_button = QPushButton("選択行を削除")
         delete_row_button.setObjectName("danger")
         delete_row_button.setToolTip(
@@ -854,6 +858,7 @@ class ComposeTab(QWidget):
         search_row.addWidget(self.search_value, 1)
         search_row.addWidget(approve_error_button)
         search_row.addWidget(add_row_button)
+        search_row.addWidget(add_column_button)
         search_row.addWidget(delete_row_button)
         self.summary = QLabel("0件")
         self.active_filter_label = QLabel("")
@@ -1561,6 +1566,39 @@ class ComposeTab(QWidget):
         first_index = self.append_rows(dialog.rows)
         self.table.selectRow(first_index)
         self.table.scrollToItem(self.table.item(first_index, 0))
+
+    def add_column(self):
+        if not self.headers:
+            QMessageBox.information(
+                self, "列の追加", "先にExcel・CSVまたは保存済み名簿を読み込むか、"
+                "「新規名簿を作成」を押してください。")
+            return
+        name, ok = QInputDialog.getText(
+            self, "列を追加", "新しい列の名前:", QLineEdit.EchoMode.Normal, "")
+        if not ok:
+            return
+        problem = validate_new_column_name(name, self.headers)
+        if problem:
+            QMessageBox.warning(self, "列の追加", problem)
+            return
+        name = name.strip()
+        self.headers = [*self.headers, name]
+        for row in self.rows:
+            row[name] = ""
+        # 表を作り直すと選択・絞り込み表示が初期化されるため、列だけを差し込む。
+        column = len(self.headers)
+        self._updating_table = True
+        self.table.setColumnCount(column + 1)
+        self.table.setHorizontalHeaderLabels(["状態（送信対象）"] + self.headers)
+        for r in range(len(self.rows)):
+            self.table.setItem(r, column, QTableWidgetItem(""))
+        self._updating_table = False
+        self.to_column.addItem(name)
+        self.filter_column.addItem(name)
+        self.tag_list.addItem(f"{{{name}}}")
+        self.refresh_validation()
+        if self.rows:
+            self.table.scrollToItem(self.table.item(max(self.table.currentRow(), 0), column))
 
     def add_row(self):
         if not self.headers:

@@ -195,6 +195,22 @@ def parse_pasted_recipients(text: str) -> list[tuple[str, str]]:
     return result
 
 
+def validate_new_column_name(name: str, headers: list[str]) -> str | None:
+    """追加する列名の問題点を返す（問題なければ None）。
+
+    { } | は差し込みタグの書式（{列名}、{前置|列名|後置}）に使われるため、
+    列名に含めるとタグとして解釈できなくなる。
+    """
+    name = name.strip()
+    if not name:
+        return "列名を入力してください。"
+    if any(char in name for char in "{}|"):
+        return "列名に { } | は使えません（差し込みタグの記号のため）。"
+    if name in (header.strip() for header in headers):
+        return f"列名「{name}」は既に使われています。"
+    return None
+
+
 def is_table_paste(text: str) -> bool:
     """Excel のセルを貼り付けたもの（タブ区切り）かどうか。"""
     return "\t" in (text or "")
