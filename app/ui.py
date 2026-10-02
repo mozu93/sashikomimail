@@ -10,10 +10,11 @@ from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog, QFormLayout,
-    QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QInputDialog, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea, QSpinBox,
-    QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QInputDialog, QMainWindow, QMenu, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox,
+    QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout,
+    QWidget,
 )
 
 from app.core import (
@@ -51,6 +52,13 @@ QMainWindow, QDialog { background: #f4f7fb; }
 QGroupBox { font-weight: bold; border: 1px solid #cbd5e1; border-radius: 7px;
             margin-top: 10px; padding-top: 12px; background: white; color: #1f2937; }
 QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; color: #174a78; }
+QFrame#section { border: 1px solid #cbd5e1; border-radius: 7px; background: white; }
+QToolButton#sectionHeader { border: 0; background: transparent; color: #174a78;
+                            font-weight: bold; padding: 4px 6px; text-align: left; }
+QToolButton#sectionHeader:hover { background: #edf4fb; }
+QLabel#sectionSummary { color: #6b7280; }
+QLabel#nextStep { color: #174a78; background: #eef4fb; border: 1px solid #cbd5e1;
+                  border-radius: 5px; padding: 5px 8px; }
 QPushButton { min-height: 28px; padding: 2px 12px; border-radius: 5px;
               border: 1px solid #9ca3af; background: #fff; color: #1f2937; }
 QPushButton:hover { background: #edf4fb; }
@@ -119,6 +127,75 @@ class NoWheelListWidget(QListWidget):
 
     def wheelEvent(self, event):
         event.ignore()
+
+
+class NotifyLabel(QLabel):
+    """setText のたびに textChanged を出す QLabel（折りたたみ中の要約表示に使う）。"""
+    textChanged = pyqtSignal(str)
+
+    def setText(self, text: str):
+        super().setText(text)
+        self.textChanged.emit(text)
+
+
+class CollapsibleSection(QFrame):
+    """見出しをクリックして開閉できる枠。閉じている間は要約を見出しの横に出す。"""
+
+    SUMMARY_LIMIT = 40
+
+    def __init__(self, title: str, content: QWidget, expanded: bool = False,
+                 summary_text=None):
+        super().__init__()
+        self.setObjectName("section")
+        self.title = title
+        self.content = content
+        self.summary_text = summary_text or (lambda text: text)
+        self._user_toggled = False
+        self.header = QToolButton()
+        self.header.setObjectName("sectionHeader")
+        self.header.setCheckable(True)
+        self.header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.header.toggled.connect(self._apply_state)
+        self.header.clicked.connect(self._mark_user_toggled)
+        self.summary = QLabel("")
+        self.summary.setObjectName("sectionSummary")
+        top = QHBoxLayout()
+        top.setContentsMargins(4, 2, 8, 2)
+        top.addWidget(self.header)
+        top.addWidget(self.summary, 1)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 4)
+        layout.addLayout(top)
+        layout.addWidget(content)
+        self.set_expanded(expanded)
+        self._apply_state(expanded)
+
+    def set_expanded(self, expanded: bool):
+        self.header.setChecked(expanded)
+
+    def is_expanded(self) -> bool:
+        return self.header.isChecked()
+
+    def auto_expand(self):
+        """利用者が自分で開閉した後は、プログラムからは開かない。"""
+        if not self._user_toggled:
+            self.set_expanded(True)
+
+    def set_summary(self, text: str):
+        text = " ".join(self.summary_text(text).split())
+        if len(text) > self.SUMMARY_LIMIT:
+            text = text[:self.SUMMARY_LIMIT] + "…"
+        self.summary.setText(text)
+        self.summary.setVisible(not self.is_expanded() and bool(text))
+
+    def _mark_user_toggled(self, _checked: bool = False):
+        self._user_toggled = True
+
+    def _apply_state(self, expanded: bool):
+        self.header.setText(("▼ " if expanded else "▶ ") + self.title)
+        self.content.setVisible(expanded)
+        self.summary.setVisible(not expanded and bool(self.summary.text()))
 
 
 class SendWorker(QThread):
@@ -781,31 +858,38 @@ class ComposeTab(QWidget):
         source = QGroupBox("1. 宛先データ")
         source_layout = QGridLayout(source)
         self.file_label = QLabel("ファイルが選択されていません")
-        choose = QPushButton("Excel / CSVを選択")
+        # 「名簿を用意する」ボタンだけを並べ、保存・出力は右端のメニューへまとめる。
+        choose = QPushButton("Excel / CSVを開く")
         choose.setObjectName("primary")
         choose.clicked.connect(self.choose_file)
-        save_list = QPushButton("現在の名簿を保存")
-        save_list.clicked.connect(self.save_recipient_list)
         open_list = QPushButton("保存済み名簿を管理…")
         open_list.setToolTip("保存済み名簿の検索・読み込み・名前変更・削除を行います")
         open_list.clicked.connect(self.open_recipient_list)
-        export_button = QPushButton("Excelとして出力")
-        export_button.setToolTip("セル編集や行削除を反映した現在のデータをExcelファイルに出力します")
-        export_button.clicked.connect(self.export_recipient_data)
-        source_layout.addWidget(choose, 0, 0)
-        source_layout.addWidget(open_list, 0, 1)
-        source_layout.addWidget(save_list, 0, 2)
-        source_layout.addWidget(export_button, 0, 3)
         new_list = QPushButton("新規名簿を作成")
         new_list.setToolTip(
             "Excel・CSVを使わず、事業所名・役職名・氏名・メールアドレスの空の名簿を作ります")
         new_list.clicked.connect(self.create_new_recipient_list)
         paste_button = QPushButton("宛先を貼り付け")
-        paste_button.setToolTip("メールアドレスを貼り付けて、名簿に行として追加します")
+        paste_button.setToolTip(
+            "メールアドレスを現在の名簿へ追加します。\n"
+            "Excelのセルは、見出し行も含めて貼り付けると新しい名簿になります")
         paste_button.clicked.connect(self.paste_recipients)
-        source_layout.addWidget(new_list, 1, 0)
-        source_layout.addWidget(paste_button, 1, 1)
-        source_layout.addWidget(self.file_label, 2, 0, 1, 4)
+        self.save_menu_button = QPushButton("名簿を保存 ▼")
+        save_menu = QMenu(self.save_menu_button)
+        save_menu.setToolTipsVisible(True)
+        self.save_list_action = save_menu.addAction("現在の名簿を保存")
+        self.save_list_action.triggered.connect(self.save_recipient_list)
+        self.export_action = save_menu.addAction("Excelとして出力")
+        self.export_action.setToolTip(
+            "セル編集や行削除を反映した現在のデータをExcelファイルに出力します")
+        self.export_action.triggered.connect(self.export_recipient_data)
+        self.save_menu_button.setMenu(save_menu)
+        source_layout.addWidget(choose, 0, 0)
+        source_layout.addWidget(open_list, 0, 1)
+        source_layout.addWidget(new_list, 0, 2)
+        source_layout.addWidget(paste_button, 0, 3)
+        source_layout.addWidget(self.save_menu_button, 0, 5)
+        source_layout.addWidget(self.file_label, 1, 0, 1, 6)
         source_layout.setColumnStretch(4, 1)
         root.addWidget(source)
 
@@ -814,7 +898,14 @@ class ComposeTab(QWidget):
         left_layout = QVBoxLayout(left)
         preview_box = QGroupBox("2. データプレビュー（セルをクリックして編集）")
         preview_layout = QVBoxLayout(preview_box)
-        filter_row = QHBoxLayout()
+        self.next_step_label = QLabel("")
+        self.next_step_label.setObjectName("nextStep")
+        self.next_step_label.setWordWrap(True)
+        # 絞り込みは普段は閉じておき、検索行の「絞り込み」ボタンで開く。
+        self.filter_widget = QWidget()
+        filter_row = QHBoxLayout(self.filter_widget)
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        self.filter_widget.setVisible(False)
         self.filter_column = QComboBox()
         self.filter_operator = QComboBox()
         self.filter_operator.addItems(["含む", "完全一致", "空欄", "空欄でない"])
@@ -836,10 +927,14 @@ class ComposeTab(QWidget):
         self.search_value.setPlaceholderText("全列から検索（入力するとすぐに反映）")
         self.search_value.setClearButtonEnabled(True)
         self.search_value.textChanged.connect(self.update_visible_rows)
-        add_row_button = QPushButton("行を追加")
+        self.filter_toggle = QPushButton("絞り込み ▼")
+        self.filter_toggle.setCheckable(True)
+        self.filter_toggle.setToolTip("列の値で行を絞り込む条件を開閉します")
+        self.filter_toggle.toggled.connect(self.on_filter_toggled)
+        self.add_row_button = add_row_button = QPushButton("行を追加")
         add_row_button.setToolTip("名簿の末尾に空の行を追加し、そのまま入力できます")
         add_row_button.clicked.connect(self.add_row)
-        add_column_button = QPushButton("列を追加")
+        self.add_column_button = add_column_button = QPushButton("列を追加")
         add_column_button.setToolTip(
             "名簿の右端に空の列を追加します（差し込みタグ {列名} としても使えます）")
         add_column_button.clicked.connect(self.add_column)
@@ -850,16 +945,20 @@ class ComposeTab(QWidget):
             "状態列の送信対象チェックとは別の操作です。")
         delete_row_button.setEnabled(False)
         delete_row_button.clicked.connect(self.delete_selected_row)
-        approve_error_button = QPushButton("選択行のエラーを確認・有効化")
+        self.approve_error_button = approve_error_button = QPushButton("選択行のエラーを確認・有効化")
         approve_error_button.setToolTip(
             "エラー内容を確認し、問題がない行だけ送信対象として有効にします")
         approve_error_button.clicked.connect(self.approve_selected_row_errors)
         search_row.addWidget(QLabel("検索"))
         search_row.addWidget(self.search_value, 1)
-        search_row.addWidget(approve_error_button)
-        search_row.addWidget(add_row_button)
-        search_row.addWidget(add_column_button)
-        search_row.addWidget(delete_row_button)
+        search_row.addWidget(self.filter_toggle)
+        # 操作を「編集」「エラー」の2つのまとまりに分けて、表の直上に置く。
+        edit_row = QHBoxLayout()
+        edit_row.addWidget(self._group_label("編集"))
+        edit_row.addWidget(add_row_button)
+        edit_row.addWidget(add_column_button)
+        edit_row.addWidget(delete_row_button)
+        edit_row.addStretch(1)
         self.summary = QLabel("0件")
         self.active_filter_label = QLabel("")
         self.active_filter_label.setStyleSheet("color: #b45309; font-weight: bold;")
@@ -874,8 +973,6 @@ class ComposeTab(QWidget):
         self.table.itemSelectionChanged.connect(self.update_delete_button)
         self.table.itemChanged.connect(self.on_table_item_changed)
         self.table.horizontalHeader().sectionClicked.connect(self.on_status_header_clicked)
-        preview_layout.addLayout(search_row)
-        preview_layout.addLayout(filter_row)
         self.prev_error_button = QPushButton("◀ 前のエラー")
         self.next_error_button = QPushButton("次のエラー ▶")
         for button, forward in ((self.prev_error_button, False),
@@ -887,13 +984,19 @@ class ComposeTab(QWidget):
                 lambda _checked=False, f=forward: self.jump_to_error(f))
         self.error_position_label = QLabel("")
         error_nav_row = QHBoxLayout()
+        error_nav_row.addWidget(self._group_label("エラー"))
         error_nav_row.addWidget(self.prev_error_button)
         error_nav_row.addWidget(self.next_error_button)
         error_nav_row.addWidget(self.error_position_label)
+        error_nav_row.addWidget(self.approve_error_button)
         error_nav_row.addStretch(1)
+        preview_layout.addWidget(self.next_step_label)
+        preview_layout.addLayout(search_row)
+        preview_layout.addWidget(self.filter_widget)
         preview_layout.addWidget(self.summary)
-        preview_layout.addLayout(error_nav_row)
         preview_layout.addWidget(self.active_filter_label)
+        preview_layout.addLayout(edit_row)
+        preview_layout.addLayout(error_nav_row)
         preview_layout.addWidget(self.table)
         left_layout.addWidget(preview_box)
         splitter.addWidget(left)
@@ -968,8 +1071,10 @@ class ComposeTab(QWidget):
         template_layout.addLayout(signature_row)
         editor_layout.addWidget(template)
 
-        tags = QGroupBox("利用可能タグ（ダブルクリックで本文へ挿入）")
+        # 使用頻度の低い部分は折りたたみ式にして、件名・本文と送信ボタンを見やすくする。
+        tags = QWidget()
         tags_layout = QVBoxLayout(tags)
+        tags_layout.setContentsMargins(6, 0, 6, 4)
         self.tag_list = NoWheelListWidget()
         self.tag_list.setMinimumHeight(155)
         self.tag_list.setMaximumHeight(190)
@@ -982,11 +1087,18 @@ class ComposeTab(QWidget):
             "例：「タグA」様、{、|タグB|様} → タグBが空欄なら「タグA様」だけになります")
         conditional_button.clicked.connect(self.insert_conditional_tag)
         tags_layout.addWidget(conditional_button)
-        editor_layout.addWidget(tags)
+        self.tags_section = CollapsibleSection(
+            "利用可能タグ（ダブルクリックで本文へ挿入）", tags, expanded=False)
+        tag_model = self.tag_list.model()
+        for signal in (tag_model.rowsInserted, tag_model.rowsRemoved, tag_model.modelReset):
+            signal.connect(self.update_tag_summary)
+        self.update_tag_summary()
+        editor_layout.addWidget(self.tags_section)
 
-        attach = QGroupBox("5. 共通添付")
+        attach = QWidget()
         attach_layout = QHBoxLayout(attach)
-        self.attach_label = QLabel("なし")
+        attach_layout.setContentsMargins(6, 0, 6, 4)
+        self.attach_label = NotifyLabel("なし")
         self.attach_label.setMinimumWidth(180)
         self.attach_usage = QProgressBar()
         self.attach_usage.setRange(0, ATTACHMENT_LIMIT)
@@ -1000,20 +1112,29 @@ class ComposeTab(QWidget):
         attach_layout.addWidget(clear_attach)
         attach_layout.addWidget(self.attach_label, 1)
         attach_layout.addWidget(self.attach_usage)
-        editor_layout.addWidget(attach)
+        attach_section = CollapsibleSection("5. 共通添付", attach, expanded=False)
+        self.attach_label.textChanged.connect(attach_section.set_summary)
+        attach_section.set_summary(self.attach_label.text())
+        editor_layout.addWidget(attach_section)
 
-        individual = QGroupBox("6. 事業所別・個別添付")
+        individual = QWidget()
         individual_layout = QHBoxLayout(individual)
+        individual_layout.setContentsMargins(6, 0, 6, 4)
         set_individual = QPushButton("個別添付フォルダを選択")
         set_individual.clicked.connect(self.set_individual_attachments)
         clear_individual = QPushButton("個別添付を解除")
         clear_individual.clicked.connect(self.clear_individual_attachments)
-        self.individual_label = QLabel(
+        self.individual_label = NotifyLabel(
             "未設定（2列の値を「_」でつないでファイル名と照合します）")
         individual_layout.addWidget(set_individual)
         individual_layout.addWidget(clear_individual)
         individual_layout.addWidget(self.individual_label, 1)
-        editor_layout.addWidget(individual)
+        individual_section = CollapsibleSection(
+            "6. 事業所別・個別添付", individual, expanded=False,
+            summary_text=lambda text: "未設定" if text.startswith("未設定") else text)
+        self.individual_label.textChanged.connect(individual_section.set_summary)
+        individual_section.set_summary(self.individual_label.text())
+        editor_layout.addWidget(individual_section)
         editor_scroll = QScrollArea()
         editor_scroll.setWidgetResizable(True)
         editor_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -1068,6 +1189,9 @@ class ComposeTab(QWidget):
         self.refresh_signatures()
         self.refresh_sender_options()
         self.refresh_attachment_status()
+        self.subject.textChanged.connect(self.update_ui_state)
+        self.body.textChanged.connect(self.update_ui_state)
+        self.update_ui_state()
 
     def refresh_templates(self):
         current = self.template_combo.currentText()
@@ -1221,6 +1345,8 @@ class ComposeTab(QWidget):
         self.to_column.setCurrentText(guessed or TO_COLUMN_PLACEHOLDER)
         self.tag_list.clear()
         self.tag_list.addItems([f"{{{header}}}" for header in self.headers])
+        if self.headers:
+            self.tags_section.auto_expand()
         self.render_table()
 
     def save_recipient_list(self):
@@ -1345,6 +1471,57 @@ class ComposeTab(QWidget):
             parts.append(f"検索中: 「{search_text}」")
         self.active_filter_label.setText(" ／ ".join(parts))
         self.active_filter_label.setVisible(bool(parts))
+        self.update_filter_toggle_text()
+
+    @staticmethod
+    def _group_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setMinimumWidth(34)
+        label.setStyleSheet("color: #6b7280; font-weight: bold;")
+        return label
+
+    def on_filter_toggled(self, opened: bool):
+        self.filter_widget.setVisible(opened)
+        self.update_filter_toggle_text()
+
+    def update_filter_toggle_text(self):
+        # 閉じていても、絞り込み中であることが分かるようにする。
+        applied = "（適用中）" if self.active_filter_desc else ""
+        self.filter_toggle.setText(
+            f"絞り込み{applied} {'▲' if self.filter_toggle.isChecked() else '▼'}")
+
+    def update_tag_summary(self, *_args):
+        count = self.tag_list.count()
+        self.tags_section.set_summary(f"{count}個" if count else "")
+
+    def next_step_message(self) -> str:
+        """いま何をすればよいかを1行で返す。"""
+        if not self.headers:
+            return ("① 名簿を用意してください"
+                    "（Excel / CSVを開く・保存済み名簿・新規名簿・宛先を貼り付け）")
+        if not self.selected_to_column():
+            return "② 「To列」でメールアドレスの列を選んでください（右の「3. 宛先設定」）"
+        if not self.rows:
+            return "③ 「行を追加」か「宛先を貼り付け」で宛先を入力してください"
+        if not self.subject.text().strip() or not self.body.toPlainText().strip():
+            return "④ 件名と本文を入力してください（右の「4. 件名・本文」）"
+        if self.unconfirmed_error_rows():
+            return "⑤ エラーのある行があります。「次のエラー」で確認してください"
+        return "⑥ 「テスト送信」で内容を確認してから「一括送信」してください"
+
+    def update_ui_state(self):
+        """名簿の有無に応じて、使えない操作を無効にし、次の手順を案内する。"""
+        has_list = bool(self.headers)
+        has_rows = bool(self.rows)
+        for widget in (self.add_row_button, self.add_column_button,
+                       self.approve_error_button, self.filter_toggle, self.search_value):
+            widget.setEnabled(has_list)
+        self.save_list_action.setEnabled(has_rows)
+        self.export_action.setEnabled(has_rows)
+        self.save_menu_button.setEnabled(has_rows)
+        if not has_list and self.filter_toggle.isChecked():
+            self.filter_toggle.setChecked(False)
+        self.next_step_label.setText(self.next_step_message())
 
     def selected_to_column(self) -> str:
         """選択中のTo列名。未選択ならプレースホルダではなく空文字を返す。"""
@@ -1363,6 +1540,7 @@ class ComposeTab(QWidget):
                 f"表示 0件 / 送信対象 0件 / 全{len(self.rows)}件{hint}")
             self.validation_errors = {}
             self.update_error_navigation()
+            self.update_ui_state()
             return
         indices = self.filtered_indices or []
         target_rows = [self.rows[index] for index in indices]
@@ -1417,6 +1595,7 @@ class ComposeTab(QWidget):
             f" / 確認済み "
             f"{sum(self.approved_validation_issues.get(i) == tuple(v) for i, v in errors.items())}件）")
         self.update_error_navigation()
+        self.update_ui_state()
 
     def unconfirmed_error_rows(self) -> list[int]:
         """表示中で、まだ確認していないエラー行の添字（昇順）。"""
