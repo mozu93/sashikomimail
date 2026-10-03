@@ -46,6 +46,12 @@
 - [ ] タグ `v1.4.0` の作成と push（ビルド・リリースの開始。実施前に確認する）
 - [ ] リリース後の実機確認（下記）
 
+### 次回リリース時に確認すること（GitHub Actions の Node.js 24 対応）
+- `checkout`・`setup-python`・`upload-artifact` を v7（node24）へ更新済み。`ci.yml` は main への push で動作確認する。
+- `release.yml` の `upload-artifact@v7` は、次のリリースのタグ push で初めて動く。ビルドとアップロードが成功することを確認する。
+- 失敗した場合は、`upload-artifact` を v6（node24 対応の旧メジャー）へ戻す。
+- 公開済みのタグを workflow_dispatch で再ビルドしない（配布物とチェックサムが置き換わるため）。
+
 ## 3. 実機で未確認の項目（offscreen 検証のみ）
 
 - 保存済み名簿の管理ダイアログの見た目と、開く・名前変更・削除の操作
