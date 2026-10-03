@@ -3423,10 +3423,52 @@ class MainWindow(QMainWindow):
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
         self.update_banner = UpdateBanner()
+        # 新しい版が見つかったとき・ダウンロードが終わったときは、バナーに加えて
+        # ダイアログでも知らせる（バナー側の処理が先に実行される接続順にしている）。
+        self.update_banner.update_found.connect(self.prompt_update)
+        self.update_banner.download_finished.connect(self.prompt_install)
         central_layout.addWidget(self.update_banner)
         central_layout.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
         self.statusBar().showMessage("ExcelまたはCSVを選択してください")
+
+    def _is_sending(self) -> bool:
+        return bool(self.compose.worker and self.compose.worker.isRunning())
+
+    def prompt_update(self, info: dict):
+        """起動後に新しい版が見つかったとき、更新するかをダイアログで尋ねる。"""
+        if self._is_sending():
+            return  # 送信中は操作を妨げない（画面上部のバナーでは通知済み）
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("アップデート")
+        box.setText(f"新しいバージョン {info['tag_name']} があります（現在 v{__version__}）。")
+        if info.get("download_url"):
+            box.setInformativeText(
+                "今すぐダウンロードして更新しますか？\n"
+                "ダウンロード後に更新すると、アプリが再起動します。\n"
+                "（「あとで」を選んでも、画面上部のバーから更新できます）")
+            accept = box.addButton("ダウンロードする", QMessageBox.ButtonRole.AcceptRole)
+        else:
+            box.setInformativeText("GitHubのリリースページで内容を確認できます。")
+            accept = box.addButton("GitHubで確認", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("あとで", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(accept)
+        box.exec()
+        if box.clickedButton() is accept:
+            self.update_banner.start_download()
+
+    def prompt_install(self, _path):
+        """ダウンロードが終わったとき、今すぐ更新するかを尋ねる。"""
+        if self._is_sending():
+            return
+        answer = QMessageBox.question(
+            self, "アップデート",
+            "ダウンロードが完了しました。\n今すぐ更新しますか？（アプリが再起動します）",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if answer == QMessageBox.StandardButton.Yes:
+            self.update_banner.install()
 
     def open_user_manual(self):
         """同梱したユーザーマニュアルをアプリ内で表示する。"""
